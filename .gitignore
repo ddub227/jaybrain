@@ -1,0 +1,40 @@
+# Runtime data (regenerated, not versioned)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ONNX model cache (downloaded on first run)
+models/
+
+# Claude Code local settings
+.claude/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/

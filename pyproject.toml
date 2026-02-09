@@ -1,0 +1,32 @@
+[project]
+name = "jaybrain"
+version = "0.1.0"
+description = "Personal AI memory server for Claude Code - persistent memory, user profiling, task tracking, and knowledge management"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.3",
+    "pydantic>=2.11",
+    "onnxruntime>=1.18",
+    "tokenizers>=0.21",
+    "sqlite-vec>=0.1.6",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

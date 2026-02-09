@@ -1,4 +1,4 @@
-"""MCP server entry point - all 18 tools for JayBrain."""
+"""MCP server entry point - all 33 tools for JayBrain."""
 
 from __future__ import annotations
 
@@ -430,6 +430,191 @@ def knowledge_update(
 
 
 # =============================================================================
+# SynapseForge Tools (7)
+# =============================================================================
+
+@mcp.tool()
+def forge_add(
+    term: str,
+    definition: str,
+    category: str = "general",
+    difficulty: str = "beginner",
+    tags: list[str] | None = None,
+    related_jaybrain_component: str = "",
+    source: str = "",
+    notes: str = "",
+) -> str:
+    """Quick-capture a concept for spaced repetition learning.
+
+    Categories: python, networking, mcp, databases, security, linux, git, ai_ml, web, devops, general.
+    Difficulty: beginner, intermediate, advanced.
+    """
+    from .forge import add_concept
+
+    try:
+        concept = add_concept(
+            term, definition, category, difficulty,
+            tags or [], related_jaybrain_component, source, notes,
+        )
+        return json.dumps({
+            "status": "added",
+            "concept_id": concept.id,
+            "term": concept.term,
+            "category": concept.category.value,
+            "mastery_name": concept.mastery_name,
+            "next_review": concept.next_review.isoformat() if concept.next_review else None,
+        })
+    except Exception as e:
+        logger.error("forge_add failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_review(
+    concept_id: str,
+    outcome: str,
+    confidence: int = 3,
+    time_spent_seconds: int = 0,
+    notes: str = "",
+) -> str:
+    """Record a review outcome for a concept.
+
+    Outcome: understood, reviewed, struggled, skipped.
+    Confidence: 1-5 (1=no idea, 5=perfect recall).
+    """
+    from .forge import record_review
+
+    try:
+        concept = record_review(concept_id, outcome, confidence, time_spent_seconds, notes)
+        return json.dumps({
+            "status": "reviewed",
+            "concept_id": concept.id,
+            "term": concept.term,
+            "mastery_level": concept.mastery_level,
+            "mastery_name": concept.mastery_name,
+            "review_count": concept.review_count,
+            "next_review": concept.next_review.isoformat() if concept.next_review else None,
+        })
+    except Exception as e:
+        logger.error("forge_review failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_study(
+    category: str | None = None,
+    limit: int = 10,
+) -> str:
+    """Get a prioritized study queue.
+
+    Returns concepts in priority order: due_now > new > struggling > up_next.
+    Optionally filter by category.
+    """
+    from .forge import get_study_queue
+
+    try:
+        queue = get_study_queue(category, limit)
+        return json.dumps(queue)
+    except Exception as e:
+        logger.error("forge_study failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_search(
+    query: str,
+    category: str | None = None,
+    difficulty: str | None = None,
+    limit: int = 10,
+) -> str:
+    """Search concepts using hybrid vector + keyword search."""
+    from .forge import search_concepts
+
+    try:
+        results = search_concepts(query, category, difficulty, limit)
+        return json.dumps({"count": len(results), "results": results})
+    except Exception as e:
+        logger.error("forge_search failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_update(
+    concept_id: str,
+    term: str | None = None,
+    definition: str | None = None,
+    category: str | None = None,
+    difficulty: str | None = None,
+    tags: list[str] | None = None,
+    related_jaybrain_component: str | None = None,
+    source: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Update a concept's fields."""
+    from .forge import update_concept
+
+    try:
+        fields = {}
+        if term is not None:
+            fields["term"] = term
+        if definition is not None:
+            fields["definition"] = definition
+        if category is not None:
+            fields["category"] = category
+        if difficulty is not None:
+            fields["difficulty"] = difficulty
+        if tags is not None:
+            fields["tags"] = tags
+        if related_jaybrain_component is not None:
+            fields["related_jaybrain_component"] = related_jaybrain_component
+        if source is not None:
+            fields["source"] = source
+        if notes is not None:
+            fields["notes"] = notes
+
+        concept = update_concept(concept_id, **fields)
+        if concept:
+            return json.dumps({
+                "status": "updated",
+                "concept_id": concept.id,
+                "term": concept.term,
+                "mastery_name": concept.mastery_name,
+            })
+        return json.dumps({"status": "not_found", "concept_id": concept_id})
+    except Exception as e:
+        logger.error("forge_update failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_stats() -> str:
+    """Get SynapseForge learning statistics: totals, distributions, streaks, mastery."""
+    from .forge import get_forge_stats
+
+    try:
+        stats_data = get_forge_stats()
+        return json.dumps(stats_data)
+    except Exception as e:
+        logger.error("forge_stats failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_explain(concept_id: str) -> str:
+    """Get full concept details with review history."""
+    from .forge import get_concept_detail
+
+    try:
+        detail = get_concept_detail(concept_id)
+        if detail:
+            return json.dumps(detail)
+        return json.dumps({"status": "not_found", "concept_id": concept_id})
+    except Exception as e:
+        logger.error("forge_explain failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # System Tools (3)
 # =============================================================================
 
@@ -486,11 +671,25 @@ def context_pack() -> str:
             for t in active_tasks[:20]
         ]
 
+        # SynapseForge context
+        forge_due = []
+        forge_streak = 0
+        try:
+            from .forge import get_study_queue, get_forge_stats
+            queue = get_study_queue(limit=5)
+            forge_due = queue.get("due_now", [])
+            stats_data = get_forge_stats()
+            forge_streak = stats_data.get("current_streak", 0)
+        except Exception:
+            pass
+
         return json.dumps({
             "profile": profile,
             "last_session": handoff,
             "active_tasks": tasks_output,
             "recent_decisions": recent_decisions,
+            "forge_due": forge_due,
+            "forge_streak": forge_streak,
         })
     except Exception as e:
         logger.error("context_pack failed: %s", e, exc_info=True)
@@ -516,6 +715,418 @@ def memory_reinforce(memory_id: str) -> str:
         return json.dumps({"status": "not_found", "memory_id": memory_id})
     except Exception as e:
         logger.error("memory_reinforce failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Job Board Tools (3)
+# =============================================================================
+
+@mcp.tool()
+def job_board_add(
+    name: str,
+    url: str,
+    board_type: str = "general",
+    tags: list[str] | None = None,
+) -> str:
+    """Register a job board URL to monitor.
+
+    Board types: general, niche, company.
+    """
+    from .job_boards import add_board
+
+    try:
+        board = add_board(name, url, board_type, tags)
+        return json.dumps({
+            "status": "added",
+            "board_id": board.id,
+            "name": board.name,
+            "url": board.url,
+            "board_type": board.board_type,
+        })
+    except Exception as e:
+        logger.error("job_board_add failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def job_board_list(active_only: bool = True) -> str:
+    """List all registered job boards with last-checked dates."""
+    from .job_boards import get_boards
+
+    try:
+        boards = get_boards(active_only=active_only)
+        output = []
+        for b in boards:
+            output.append({
+                "id": b.id,
+                "name": b.name,
+                "url": b.url,
+                "board_type": b.board_type,
+                "tags": b.tags,
+                "active": b.active,
+                "last_checked": b.last_checked.isoformat() if b.last_checked else None,
+                "created_at": b.created_at.isoformat(),
+            })
+        return json.dumps({"count": len(output), "boards": output})
+    except Exception as e:
+        logger.error("job_board_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def job_board_fetch(
+    board_id: str,
+    max_pages: int = 0,
+    render: str = "auto",
+) -> str:
+    """Fetch a job board URL with smart scraping: SPA detection, pagination, metadata.
+
+    Fetches the page, auto-detects JS-rendered SPAs (Playwright fallback),
+    follows pagination links, extracts clean text + OG/JSON-LD metadata.
+    Use the returned text to identify job postings, then call job_add() for each.
+
+    render: "auto" (detect SPAs), "always" (force Playwright), "never" (plain HTTP only).
+    max_pages: pagination pages to follow (0 = default from config).
+    """
+    from .job_boards import fetch_board
+
+    try:
+        result = fetch_board(board_id, max_pages=max_pages, render=render)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("job_board_fetch failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Job Posting Tools (3)
+# =============================================================================
+
+@mcp.tool()
+def job_add(
+    title: str,
+    company: str,
+    url: str = "",
+    description: str = "",
+    required_skills: list[str] | None = None,
+    preferred_skills: list[str] | None = None,
+    salary_min: int | None = None,
+    salary_max: int | None = None,
+    job_type: str = "full_time",
+    work_mode: str = "remote",
+    location: str = "",
+    board_id: str | None = None,
+    tags: list[str] | None = None,
+) -> str:
+    """Add a job posting (from scraping or manual entry).
+
+    Job types: full_time, part_time, contract, internship.
+    Work modes: remote, hybrid, onsite.
+    """
+    from .jobs import add_job
+
+    try:
+        posting = add_job(
+            title, company, url, description,
+            required_skills, preferred_skills,
+            salary_min, salary_max,
+            job_type, work_mode, location, board_id, tags,
+        )
+        return json.dumps({
+            "status": "added",
+            "job_id": posting.id,
+            "title": posting.title,
+            "company": posting.company,
+            "work_mode": posting.work_mode.value,
+        })
+    except Exception as e:
+        logger.error("job_add failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def job_search(
+    query: str | None = None,
+    company: str | None = None,
+    work_mode: str | None = None,
+    limit: int = 20,
+) -> str:
+    """Search saved job postings using full-text search and filters.
+
+    Search by keyword query, company name, or work mode (remote/hybrid/onsite).
+    """
+    from .jobs import search_jobs
+
+    try:
+        postings = search_jobs(query, company, work_mode, limit)
+        output = []
+        for p in postings:
+            output.append({
+                "id": p.id,
+                "title": p.title,
+                "company": p.company,
+                "url": p.url,
+                "required_skills": p.required_skills,
+                "preferred_skills": p.preferred_skills,
+                "salary_min": p.salary_min,
+                "salary_max": p.salary_max,
+                "job_type": p.job_type.value,
+                "work_mode": p.work_mode.value,
+                "location": p.location,
+                "tags": p.tags,
+                "created_at": p.created_at.isoformat(),
+            })
+        return json.dumps({"count": len(output), "postings": output})
+    except Exception as e:
+        logger.error("job_search failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def job_get(job_id: str) -> str:
+    """Get full job posting details including description."""
+    from .jobs import get_job
+
+    try:
+        posting = get_job(job_id)
+        if not posting:
+            return json.dumps({"status": "not_found", "job_id": job_id})
+        return json.dumps({
+            "id": posting.id,
+            "title": posting.title,
+            "company": posting.company,
+            "url": posting.url,
+            "description": posting.description,
+            "required_skills": posting.required_skills,
+            "preferred_skills": posting.preferred_skills,
+            "salary_min": posting.salary_min,
+            "salary_max": posting.salary_max,
+            "job_type": posting.job_type.value,
+            "work_mode": posting.work_mode.value,
+            "location": posting.location,
+            "board_id": posting.board_id,
+            "tags": posting.tags,
+            "created_at": posting.created_at.isoformat(),
+        })
+    except Exception as e:
+        logger.error("job_get failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Application Tools (3)
+# =============================================================================
+
+@mcp.tool()
+def app_create(
+    job_id: str,
+    status: str = "discovered",
+    notes: str = "",
+    tags: list[str] | None = None,
+) -> str:
+    """Start tracking an application for a job posting.
+
+    Status: discovered, preparing, ready, applied, interviewing, offered, rejected, withdrawn.
+    """
+    from .applications import create_application
+
+    try:
+        app = create_application(job_id, status, notes, tags)
+        return json.dumps({
+            "status": "created",
+            "application_id": app.id,
+            "job_id": app.job_id,
+            "app_status": app.status.value,
+        })
+    except Exception as e:
+        logger.error("app_create failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def app_update(
+    application_id: str,
+    status: str | None = None,
+    resume_path: str | None = None,
+    cover_letter_path: str | None = None,
+    applied_date: str | None = None,
+    notes: str | None = None,
+    tags: list[str] | None = None,
+) -> str:
+    """Update an application's status, documents, or notes.
+
+    Status: discovered, preparing, ready, applied, interviewing, offered, rejected, withdrawn.
+    Applied date format: YYYY-MM-DD.
+    """
+    from .applications import modify_application
+
+    try:
+        fields = {}
+        if status is not None:
+            fields["status"] = status
+        if resume_path is not None:
+            fields["resume_path"] = resume_path
+        if cover_letter_path is not None:
+            fields["cover_letter_path"] = cover_letter_path
+        if applied_date is not None:
+            fields["applied_date"] = applied_date
+        if notes is not None:
+            fields["notes"] = notes
+        if tags is not None:
+            fields["tags"] = tags
+
+        app = modify_application(application_id, **fields)
+        if app:
+            return json.dumps({
+                "status": "updated",
+                "application": {
+                    "id": app.id,
+                    "job_id": app.job_id,
+                    "app_status": app.status.value,
+                    "resume_path": app.resume_path,
+                    "cover_letter_path": app.cover_letter_path,
+                    "applied_date": app.applied_date,
+                },
+            })
+        return json.dumps({"status": "not_found", "application_id": application_id})
+    except Exception as e:
+        logger.error("app_update failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def app_list(
+    status: str | None = None,
+    limit: int = 50,
+) -> str:
+    """List applications with pipeline summary (counts by status).
+
+    Optionally filter by status. Returns both the list and a pipeline dashboard.
+    """
+    from .applications import get_applications
+
+    try:
+        result = get_applications(status=status, limit=limit)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("app_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Resume & Skills Tools (3)
+# =============================================================================
+
+@mcp.tool()
+def resume_get_template() -> str:
+    """Read the resume template with all HTML comment markers.
+
+    Returns the full template content from the configured path.
+    Use the markers to identify tailorable sections.
+    """
+    from .resume_tailor import get_template
+
+    try:
+        result = get_template()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("resume_get_template failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def resume_analyze_fit(job_id: str) -> str:
+    """Compare JJ's skills against a job posting.
+
+    Returns match score, missing skills, and recommendations.
+    Uses the resume template's SKILLS section for comparison.
+    """
+    from .resume_tailor import analyze_fit
+
+    try:
+        result = analyze_fit(job_id)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("resume_analyze_fit failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def resume_save_tailored(company: str, role: str, content: str) -> str:
+    """Save a tailored resume as markdown.
+
+    Saves to: Documents/job_search/resumes/Resume_JoshuaBudd_Company_Role.md
+    """
+    from .resume_tailor import save_tailored_resume
+
+    try:
+        result = save_tailored_resume(company, role, content)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("resume_save_tailored failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Cover Letter & Interview Tools (3)
+# =============================================================================
+
+@mcp.tool()
+def cover_letter_save(company: str, role: str, content: str) -> str:
+    """Save a cover letter as markdown.
+
+    Saves to: Documents/job_search/cover_letters/CoverLetter_JoshuaBudd_Company_Role.md
+    """
+    from .resume_tailor import save_cover_letter
+
+    try:
+        result = save_cover_letter(company, role, content)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("cover_letter_save failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def interview_prep_add(
+    application_id: str,
+    prep_type: str = "general",
+    content: str = "",
+    tags: list[str] | None = None,
+) -> str:
+    """Save interview prep content for an application.
+
+    Prep types: general, technical, behavioral, company_research.
+    """
+    from .interview_prep import add_prep
+
+    try:
+        prep = add_prep(application_id, prep_type, content, tags)
+        return json.dumps({
+            "status": "added",
+            "prep_id": prep.id,
+            "application_id": prep.application_id,
+            "prep_type": prep.prep_type.value,
+        })
+    except Exception as e:
+        logger.error("interview_prep_add failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def interview_prep_get(application_id: str) -> str:
+    """Get full interview context: job, application, all prep, profile, resume excerpt.
+
+    Aggregates everything needed to prepare for an interview into one response.
+    """
+    from .interview_prep import get_prep_context
+
+    try:
+        result = get_prep_context(application_id)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("interview_prep_get failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
 
 

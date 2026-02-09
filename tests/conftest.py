@@ -21,6 +21,9 @@ def temp_data_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "SESSIONS_DIR", data_dir / "sessions")
     monkeypatch.setattr(config, "PROFILE_PATH", data_dir / "profile.yaml")
     monkeypatch.setattr(config, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(config, "FORGE_DIR", data_dir / "forge")
+    monkeypatch.setattr(config, "JOB_SEARCH_DIR", tmp_path / "job_search")
+    monkeypatch.setattr(config, "RESUME_TEMPLATE_PATH", tmp_path / "job_search" / "resume_template.md")
 
     # Also patch the db module's reference to DB_PATH
     import jaybrain.db as db_module

@@ -65,9 +65,11 @@ JayBrain includes job hunting tools that search job boards, craft tailored resum
 
 **Interview prep:** When JJ gets an interview, use `interview_prep_get(application_id)` for full context, generate prep content, then `interview_prep_add()` by type (general, technical, behavioral, company_research).
 
+**Google Docs integration:** `resume_save_tailored()` and `cover_letter_save()` automatically create formatted Google Docs via the Docs API in addition to local markdown files. The `gdoc_create(title, content)` tool is also available for creating any Google Doc from markdown. Docs are shared with JJ's email by default. If Google credentials are unavailable, local saves still succeed with a `gdoc_warning` field.
+
 **Output files:**
-- Resumes: `~/Documents/job_search/resumes/Resume_JoshuaBudd_Company_Role.md`
-- Cover letters: `~/Documents/job_search/cover_letters/CoverLetter_JoshuaBudd_Company_Role.md`
+- Resumes: `~/Documents/job_search/resumes/Resume_JoshuaBudd_Company_Role.md` + Google Doc
+- Cover letters: `~/Documents/job_search/cover_letters/CoverLetter_JoshuaBudd_Company_Role.md` + Google Doc
 
 ## Style Rules
 

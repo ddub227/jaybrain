@@ -150,7 +150,7 @@ def _fit_recommendation(score: float, gaps: list[str]) -> str:
 
 
 def save_tailored_resume(company: str, role: str, content: str) -> dict:
-    """Save a tailored resume as markdown."""
+    """Save a tailored resume as markdown and create a Google Doc."""
     resumes_dir = JOB_SEARCH_DIR / "resumes"
     resumes_dir.mkdir(parents=True, exist_ok=True)
 
@@ -162,15 +162,31 @@ def save_tailored_resume(company: str, role: str, content: str) -> dict:
     filepath.write_text(content, encoding="utf-8")
     logger.info("Saved tailored resume: %s", filepath)
 
-    return {
+    result = {
         "status": "saved",
         "path": str(filepath),
         "filename": filename,
     }
 
+    # Create Google Doc
+    try:
+        from .gdocs import create_google_doc
+        doc_title = f"Resume - Joshua Budd - {company} {role}"
+        gdoc_result = create_google_doc(doc_title, content)
+        if "error" in gdoc_result:
+            result["gdoc_warning"] = gdoc_result["error"]
+        else:
+            result["gdoc_url"] = gdoc_result["doc_url"]
+            result["gdoc_id"] = gdoc_result["doc_id"]
+    except Exception as e:
+        logger.warning("Google Doc creation failed for resume: %s", e)
+        result["gdoc_warning"] = str(e)
+
+    return result
+
 
 def save_cover_letter(company: str, role: str, content: str) -> dict:
-    """Save a cover letter as markdown."""
+    """Save a cover letter as markdown and create a Google Doc."""
     cover_dir = JOB_SEARCH_DIR / "cover_letters"
     cover_dir.mkdir(parents=True, exist_ok=True)
 
@@ -182,11 +198,27 @@ def save_cover_letter(company: str, role: str, content: str) -> dict:
     filepath.write_text(content, encoding="utf-8")
     logger.info("Saved cover letter: %s", filepath)
 
-    return {
+    result = {
         "status": "saved",
         "path": str(filepath),
         "filename": filename,
     }
+
+    # Create Google Doc
+    try:
+        from .gdocs import create_google_doc
+        doc_title = f"Cover Letter - Joshua Budd - {company} {role}"
+        gdoc_result = create_google_doc(doc_title, content)
+        if "error" in gdoc_result:
+            result["gdoc_warning"] = gdoc_result["error"]
+        else:
+            result["gdoc_url"] = gdoc_result["doc_url"]
+            result["gdoc_id"] = gdoc_result["doc_id"]
+    except Exception as e:
+        logger.warning("Google Doc creation failed for cover letter: %s", e)
+        result["gdoc_warning"] = str(e)
+
+    return result
 
 
 def _safe_filename(name: str) -> str:

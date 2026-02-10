@@ -13,6 +13,8 @@ dependencies = [
     "numpy>=1.26",
     "requests>=2.31",
     "beautifulsoup4>=4.12",
+    "google-api-python-client>=2.100",
+    "google-auth>=2.23",
 ]
 
 [project.optional-dependencies]

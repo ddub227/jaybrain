@@ -16,6 +16,22 @@ MODELS_DIR = PROJECT_ROOT / "models"
 JOB_SEARCH_DIR = Path(os.path.expanduser("~")) / "Documents" / "job_search"
 RESUME_TEMPLATE_PATH = JOB_SEARCH_DIR / "resume_template.md"
 
+# Google Docs integration (OAuth for user account, service account for Sheets MCP)
+SERVICE_ACCOUNT_PATH = Path(
+    os.environ.get(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        os.path.expanduser("~/.config/gcloud/jaybrain-service-account.json"),
+    )
+)
+OAUTH_CLIENT_PATH = Path(
+    os.path.expanduser("~/.config/gcloud/jaybrain-oauth-client.json")
+)
+OAUTH_TOKEN_PATH = Path(
+    os.path.expanduser("~/.config/gcloud/jaybrain-oauth-token.json")
+)
+GDOC_SHARE_EMAIL = os.environ.get("GDOC_SHARE_EMAIL", "joshuajbudd@gmail.com")
+GDOC_FOLDER_ID = os.environ.get("GDOC_FOLDER_ID", "1WUi1Ty1ghheHQPdQhbieLp5NN2Jt1CJt")
+
 # Scraping constants
 SCRAPE_TIMEOUT = 30  # seconds
 SCRAPE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"

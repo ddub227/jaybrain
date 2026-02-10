@@ -1054,9 +1054,11 @@ def resume_analyze_fit(job_id: str) -> str:
 
 @mcp.tool()
 def resume_save_tailored(company: str, role: str, content: str) -> str:
-    """Save a tailored resume as markdown.
+    """Save a tailored resume as markdown and create a Google Doc.
 
-    Saves to: Documents/job_search/resumes/Resume_JoshuaBudd_Company_Role.md
+    Saves locally to: Documents/job_search/resumes/Resume_JoshuaBudd_Company_Role.md
+    Also creates a formatted Google Doc shared with JJ and returns its URL.
+    If Google Docs is unavailable, the local save still succeeds.
     """
     from .resume_tailor import save_tailored_resume
 
@@ -1069,14 +1071,50 @@ def resume_save_tailored(company: str, role: str, content: str) -> str:
 
 
 # =============================================================================
+# Google Docs Tools (1)
+# =============================================================================
+
+@mcp.tool()
+def gdoc_create(
+    title: str,
+    content: str,
+    folder_id: str = "",
+    share_with: str = "",
+) -> str:
+    """Create a formatted Google Doc from markdown content.
+
+    Converts markdown (headings, bold, italic, bullets, rules) into a
+    styled Google Doc. Shares with JJ by default.
+
+    Args:
+        title: Document title.
+        content: Markdown-formatted content.
+        folder_id: Optional Drive folder ID (uses default if empty).
+        share_with: Optional email to share with (uses default if empty).
+
+    Returns doc_id, doc_url, and title on success.
+    """
+    from .gdocs import create_google_doc
+
+    try:
+        result = create_google_doc(title, content, folder_id, share_with)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("gdoc_create failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Cover Letter & Interview Tools (3)
 # =============================================================================
 
 @mcp.tool()
 def cover_letter_save(company: str, role: str, content: str) -> str:
-    """Save a cover letter as markdown.
+    """Save a cover letter as markdown and create a Google Doc.
 
-    Saves to: Documents/job_search/cover_letters/CoverLetter_JoshuaBudd_Company_Role.md
+    Saves locally to: Documents/job_search/cover_letters/CoverLetter_JoshuaBudd_Company_Role.md
+    Also creates a formatted Google Doc shared with JJ and returns its URL.
+    If Google Docs is unavailable, the local save still succeeds.
     """
     from .resume_tailor import save_cover_letter
 

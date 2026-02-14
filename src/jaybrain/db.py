@@ -39,13 +39,25 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Initialize the database schema."""
+    """Initialize the database schema and run migrations."""
     conn = get_connection()
     try:
         conn.executescript(SCHEMA_SQL)
         conn.commit()
+        _run_migrations(conn)
     finally:
         conn.close()
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Apply schema migrations for existing databases."""
+    # Add session_id column to memories if missing
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()
+    }
+    if "session_id" not in columns:
+        conn.execute("ALTER TABLE memories ADD COLUMN session_id TEXT")
+        conn.commit()
 
 
 SCHEMA_SQL = f"""
@@ -58,9 +70,16 @@ CREATE TABLE IF NOT EXISTS memories (
     importance REAL NOT NULL DEFAULT 0.5,
     access_count INTEGER NOT NULL DEFAULT 0,
     last_accessed TEXT,
+    session_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Memories indexes
+CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
+CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);
+CREATE INDEX IF NOT EXISTS idx_memories_session_id ON memories(session_id);
 
 -- Memories FTS5 for keyword search
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -134,6 +153,10 @@ CREATE TABLE IF NOT EXISTS knowledge (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Knowledge indexes
+CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge(category);
+CREATE INDEX IF NOT EXISTS idx_knowledge_created_at ON knowledge(created_at);
 
 -- Knowledge FTS5 for keyword search
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
@@ -367,14 +390,15 @@ def insert_memory(
     tags: list[str],
     importance: float,
     embedding: Optional[list[float]] = None,
+    session_id: Optional[str] = None,
 ) -> None:
     """Insert a memory into all tables (memories, FTS, vec) atomically."""
     now = now_iso()
     tags_json = json.dumps(tags)
     conn.execute(
-        """INSERT INTO memories (id, content, category, tags, importance, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (memory_id, content, category, tags_json, importance, now, now),
+        """INSERT INTO memories (id, content, category, tags, importance, session_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (memory_id, content, category, tags_json, importance, session_id, now, now),
     )
     if embedding is not None:
         conn.execute(
@@ -399,6 +423,19 @@ def get_memory(conn: sqlite3.Connection, memory_id: str) -> Optional[sqlite3.Row
     return conn.execute(
         "SELECT * FROM memories WHERE id = ?", (memory_id,)
     ).fetchone()
+
+
+def get_memories_batch(
+    conn: sqlite3.Connection, ids: list[str]
+) -> dict[str, sqlite3.Row]:
+    """Fetch multiple memories in a single query. Returns {id: row} dict."""
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT * FROM memories WHERE id IN ({placeholders})", ids
+    ).fetchall()
+    return {row["id"]: row for row in rows}
 
 
 def update_memory_access(conn: sqlite3.Connection, memory_id: str) -> None:

@@ -61,6 +61,7 @@ class Memory(BaseModel):
     updated_at: datetime
     access_count: int = 0
     last_accessed: Optional[datetime] = None
+    session_id: Optional[str] = None
 
 
 class MemorySearchResult(BaseModel):

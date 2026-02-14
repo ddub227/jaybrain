@@ -11,11 +11,10 @@ from typing import Optional
 
 from .config import (
     MEMORIES_DIR,
-    DECAY_PERIOD_DAYS,
+    DECAY_HALF_LIFE_DAYS,
+    DECAY_ACCESS_HALF_LIFE_BONUS,
+    DECAY_MAX_HALF_LIFE,
     MIN_DECAY,
-    ACCESS_REINFORCEMENT,
-    MAX_REINFORCEMENT,
-    RECENCY_BOOST_DAYS,
     DEFAULT_SEARCH_LIMIT,
     SEARCH_CANDIDATES,
 )
@@ -24,6 +23,7 @@ from .db import (
     insert_memory,
     delete_memory,
     get_memory,
+    get_memories_batch,
     update_memory_access,
     search_memories_fts,
     search_memories_vec,
@@ -55,6 +55,7 @@ def _parse_memory_row(row: sqlite3.Row) -> Memory:
             if row["last_accessed"]
             else None
         ),
+        session_id=row["session_id"] if row["session_id"] else None,
     )
 
 
@@ -84,38 +85,48 @@ def _write_memory_markdown(memory: Memory) -> None:
 
 def compute_decay(
     created_at: datetime,
-    access_count: int,
+    importance: float,
+    access_count: int = 0,
     last_accessed: Optional[datetime] = None,
     now: Optional[datetime] = None,
 ) -> float:
-    """Compute memory decay factor (0.1 to 1.0+).
+    """Compute memory decay factor using SM-2 inspired exponential model.
 
-    Linear decay over DECAY_PERIOD_DAYS, counteracted by access reinforcement
-    and recency boost.
+    Each access extends the half-life, so frequently accessed memories persist
+    much longer. Importance scales the final score.
+
+    Returns a value between MIN_DECAY and 1.0.
     """
     if now is None:
         now = datetime.now(timezone.utc)
 
-    # Ensure both datetimes are timezone-aware for comparison
+    # Ensure datetimes are timezone-aware
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
 
-    days_old = (now - created_at).total_seconds() / 86400
-    base_decay = max(MIN_DECAY, 1.0 - days_old / DECAY_PERIOD_DAYS)
+    # Effective half-life grows with each access
+    effective_half_life = min(
+        DECAY_HALF_LIFE_DAYS + (access_count * DECAY_ACCESS_HALF_LIFE_BONUS),
+        DECAY_MAX_HALF_LIFE,
+    )
 
-    # Access reinforcement
-    reinforcement = min(access_count * ACCESS_REINFORCEMENT, MAX_REINFORCEMENT)
-
-    # Recency boost from last access
-    recency_boost = 0.0
+    # Decay from the most recent touch point (creation or last access)
+    last_touch = created_at
     if last_accessed is not None:
         if last_accessed.tzinfo is None:
             last_accessed = last_accessed.replace(tzinfo=timezone.utc)
-        days_since_access = (now - last_accessed).total_seconds() / 86400
-        if days_since_access < RECENCY_BOOST_DAYS:
-            recency_boost = 0.2 * (1.0 - days_since_access / RECENCY_BOOST_DAYS)
+        if last_accessed > created_at:
+            last_touch = last_accessed
 
-    return base_decay + reinforcement + recency_boost
+    days_since_touch = max(0.0, (now - last_touch).total_seconds() / 86400)
+
+    # Exponential decay: 0.5^(days / half_life)
+    raw_decay = 0.5 ** (days_since_touch / effective_half_life)
+
+    # Importance scales the result: importance=1.0 -> full score, importance=0.0 -> half score
+    final = raw_decay * (0.5 + 0.5 * importance)
+
+    return max(MIN_DECAY, final)
 
 
 def remember(
@@ -125,8 +136,11 @@ def remember(
     importance: float = 0.5,
 ) -> Memory:
     """Store a new memory. Writes markdown file, generates embedding, inserts into DB."""
+    from .sessions import get_current_session_id
+
     tags = tags or []
     memory_id = _generate_id()
+    session_id = get_current_session_id()
 
     # Generate embedding
     try:
@@ -138,7 +152,7 @@ def remember(
     # Insert into database
     conn = get_connection()
     try:
-        insert_memory(conn, memory_id, content, category, tags, importance, embedding)
+        insert_memory(conn, memory_id, content, category, tags, importance, embedding, session_id)
         row = get_memory(conn, memory_id)
     finally:
         conn.close()
@@ -195,11 +209,19 @@ def recall(
                 for row in rows
             ]
 
-        # Fetch full memory data and apply decay
+        # Batch fetch all candidate memories in one query
+        candidate_ids = [mem_id for mem_id, _ in merged]
+        rows_by_id = get_memories_batch(conn, candidate_ids)
+
+        # Build lookup dicts for individual scores
+        vec_scores = {vid: vd for vid, vd in vec_results}
+        kw_scores = {kid: ks for kid, ks in fts_results}
+
+        # Apply decay and filters
         results = []
         now = datetime.now(timezone.utc)
         for mem_id, search_score in merged:
-            row = get_memory(conn, mem_id)
+            row = rows_by_id.get(mem_id)
             if row is None:
                 continue
 
@@ -213,27 +235,18 @@ def recall(
             if tags and not any(t in memory.tags for t in tags):
                 continue
 
-            # Apply decay and importance multiplier
-            decay = compute_decay(memory.created_at, memory.access_count, memory.last_accessed, now)
-            final_score = search_score * decay * (0.5 + memory.importance)
-
-            # Find individual scores for reporting
-            vec_score = 0.0
-            kw_score = 0.0
-            for vid, vd in vec_results:
-                if vid == mem_id:
-                    vec_score = vd
-                    break
-            for kid, ks in fts_results:
-                if kid == mem_id:
-                    kw_score = ks
-                    break
+            # Apply decay (importance is factored into decay now)
+            decay = compute_decay(
+                memory.created_at, memory.importance,
+                memory.access_count, memory.last_accessed, now,
+            )
+            final_score = search_score * decay
 
             results.append(MemorySearchResult(
                 memory=memory,
                 score=round(final_score, 4),
-                vector_score=round(vec_score, 4),
-                keyword_score=round(kw_score, 4),
+                vector_score=round(vec_scores.get(mem_id, 0.0), 4),
+                keyword_score=round(kw_scores.get(mem_id, 0.0), 4),
             ))
 
             # Update access count

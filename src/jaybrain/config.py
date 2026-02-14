@@ -43,12 +43,11 @@ EMBEDDING_DIM = 384
 ONNX_MODEL_URL = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"
 TOKENIZER_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
-# Memory decay constants
-DECAY_PERIOD_DAYS = 365
-MIN_DECAY = 0.1
-ACCESS_REINFORCEMENT = 0.05
-MAX_REINFORCEMENT = 0.4
-RECENCY_BOOST_DAYS = 90
+# Memory decay constants (SM-2 inspired exponential model)
+DECAY_HALF_LIFE_DAYS = 90          # base half-life before 50% decay
+DECAY_ACCESS_HALF_LIFE_BONUS = 30  # extra half-life days per access
+DECAY_MAX_HALF_LIFE = 730          # cap at ~2 years
+MIN_DECAY = 0.05                   # absolute floor
 
 # Search defaults
 DEFAULT_SEARCH_LIMIT = 10

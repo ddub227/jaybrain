@@ -24,9 +24,33 @@ def temp_data_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "FORGE_DIR", data_dir / "forge")
     monkeypatch.setattr(config, "JOB_SEARCH_DIR", tmp_path / "job_search")
     monkeypatch.setattr(config, "RESUME_TEMPLATE_PATH", tmp_path / "job_search" / "resume_template.md")
+    monkeypatch.setattr(config, "ACTIVE_SESSION_FILE", data_dir / ".active_session")
 
     # Also patch the db module's reference to DB_PATH
     import jaybrain.db as db_module
     monkeypatch.setattr(db_module, "DB_PATH", data_dir / "jaybrain.db")
+
+    # Patch resume_tailor's imported references so they use the temp paths
+    import jaybrain.resume_tailor as resume_mod
+    monkeypatch.setattr(resume_mod, "RESUME_TEMPLATE_PATH", tmp_path / "job_search" / "resume_template.md")
+    monkeypatch.setattr(resume_mod, "JOB_SEARCH_DIR", tmp_path / "job_search")
+
+    # Patch sessions module's imported references
+    import jaybrain.sessions as sessions_mod
+    monkeypatch.setattr(sessions_mod, "SESSIONS_DIR", data_dir / "sessions")
+    monkeypatch.setattr(sessions_mod, "ACTIVE_SESSION_FILE", data_dir / ".active_session")
+
+    # Homelab paths (file-based, isolated to tmp_path)
+    homelab_root = tmp_path / "homelab"
+    homelab_notes = homelab_root / "notes"
+    homelab_journal = homelab_notes / "Journal"
+    monkeypatch.setattr(config, "HOMELAB_ROOT", homelab_root)
+    monkeypatch.setattr(config, "HOMELAB_NOTES_DIR", homelab_notes)
+    monkeypatch.setattr(config, "HOMELAB_JOURNAL_DIR", homelab_journal)
+    monkeypatch.setattr(config, "HOMELAB_JOURNAL_INDEX", homelab_journal / "JOURNAL_INDEX.md")
+    monkeypatch.setattr(config, "HOMELAB_CODEX_PATH", homelab_notes / "LABSCRIBE_CODEX.md")
+    monkeypatch.setattr(config, "HOMELAB_NEXUS_PATH", homelab_notes / "LAB_NEXUS.md")
+    monkeypatch.setattr(config, "HOMELAB_TOOLS_CSV", homelab_root / "HOMELAB_TOOLS_INVENTORY.csv")
+    monkeypatch.setattr(config, "HOMELAB_ATTACHMENTS_DIR", homelab_journal / "attachments")
 
     return data_dir

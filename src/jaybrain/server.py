@@ -417,7 +417,7 @@ def queue_bump(task_id: str) -> str:
 
 
 # =============================================================================
-# Session Tools (3)
+# Session Tools (4)
 # =============================================================================
 
 @mcp.tool()
@@ -477,6 +477,35 @@ def session_handoff() -> str:
         return json.dumps({"status": "no_previous_sessions"})
     except Exception as e:
         logger.error("session_handoff failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def session_checkpoint(
+    summary: str,
+    decisions_made: list[str] | None = None,
+    next_steps: list[str] | None = None,
+) -> str:
+    """Save a mid-session checkpoint. Call after major milestones or every ~30 tool uses.
+
+    Does NOT close the session -- just saves progress so nothing is lost
+    if the context window runs out. Overwrites the previous checkpoint.
+
+    Call proactively:
+    - After completing each major task or phase
+    - Every ~30 tool calls
+    - Before starting a risky or long operation
+    - When context compression is happening
+    """
+    from .sessions import checkpoint_session as _checkpoint
+
+    try:
+        result = _checkpoint(summary, decisions_made, next_steps)
+        if result:
+            return json.dumps({"status": "checkpointed", **result})
+        return json.dumps({"status": "no_active_session"})
+    except Exception as e:
+        logger.error("session_checkpoint failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
 
 
@@ -935,6 +964,7 @@ def context_pack() -> str:
     """Get full startup context: profile + last session handoff + active tasks + recent decisions.
 
     Call this at the start of every session for complete context restoration.
+    Includes session health indicator and recovered context for orphaned sessions.
     """
     from .profile import get_profile
     from .sessions import get_handoff
@@ -980,14 +1010,48 @@ def context_pack() -> str:
         except Exception:
             pass
 
-        return json.dumps({
+        # Session health detection
+        session_health = "clean"
+        recovered_context = None
+        if handoff:
+            summary = handoff.get("summary", "")
+            if summary.startswith("[Auto-recovered]"):
+                session_health = "recovered"
+                # Include checkpoint data if available
+                recovered_context = {
+                    "summary": summary,
+                    "note": "Previous session ended unexpectedly but context was recovered from checkpoints/Pulse/memories.",
+                }
+            elif summary.startswith("[Auto-closed]"):
+                session_health = "lost"
+                recovered_context = {
+                    "summary": summary,
+                    "note": "Previous session ended unexpectedly with minimal recovery data. Check Pulse activity for details.",
+                }
+                # Try to supplement with Pulse data
+                try:
+                    from .pulse import get_session_activity
+                    last_sid = handoff.get("id", "")
+                    if last_sid:
+                        activity = get_session_activity(last_sid, limit=10)
+                        if activity.get("activities"):
+                            recovered_context["recent_activity"] = activity["activities"][:5]
+                except Exception:
+                    pass
+
+        result = {
             "profile": profile,
             "last_session": handoff,
+            "session_health": session_health,
             "active_tasks": tasks_output,
             "recent_decisions": recent_decisions,
             "forge_due": forge_due,
             "forge_streak": forge_streak,
-        })
+        }
+        if recovered_context:
+            result["recovered_context"] = recovered_context
+
+        return json.dumps(result)
     except Exception as e:
         logger.error("context_pack failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
@@ -2330,6 +2394,73 @@ def browser_tab_close(index: int | None = None) -> str:
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_tab_close failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Browser CDP: Cross-Process Reconnection (3)
+# =============================================================================
+
+@mcp.tool()
+def browser_launch_cdp(
+    port: int = 9222,
+    url: str = "",
+    headless: bool = False,
+) -> str:
+    """Launch Chrome with CDP remote debugging for cross-process use.
+
+    Unlike browser_launch(), the browser survives across tool calls.
+    Use this when you need to launch a browser, let the user interact
+    (e.g. sign in, complete MFA), then reconnect later with browser_connect_cdp().
+
+    port: Remote debugging port (default 9222).
+    url: Optional URL to open immediately.
+    headless: Run in headless mode (default False for user interaction).
+    """
+    from .browser import launch_with_cdp
+
+    try:
+        result = launch_with_cdp(port=port, url=url, headless=headless)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_launch_cdp failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_connect_cdp(endpoint: str = "") -> str:
+    """Reconnect to an already-running Chrome browser via CDP.
+
+    Call this after browser_launch_cdp() to reconnect from a new process,
+    or after the user has finished interacting with the browser manually.
+    If no endpoint is given, reads the saved endpoint from the last launch.
+
+    endpoint: CDP HTTP endpoint (e.g. 'http://127.0.0.1:9222'). Leave empty for auto-detect.
+    """
+    from .browser import connect_to_cdp
+
+    try:
+        result = connect_to_cdp(endpoint=endpoint)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_connect_cdp failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_disconnect_cdp() -> str:
+    """Disconnect from the CDP browser WITHOUT closing it.
+
+    The browser keeps running so the user can interact manually.
+    Call browser_connect_cdp() to reconnect later.
+    """
+    from .browser import disconnect_cdp
+
+    try:
+        result = disconnect_cdp()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_disconnect_cdp failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
 
 

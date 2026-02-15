@@ -9,6 +9,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = DATA_DIR / "jaybrain.db"
 MEMORIES_DIR = DATA_DIR / "memories"
 SESSIONS_DIR = DATA_DIR / "sessions"
+ACTIVE_SESSION_FILE = DATA_DIR / ".active_session"
 PROFILE_PATH = DATA_DIR / "profile.yaml"
 MODELS_DIR = PROJECT_ROOT / "models"
 
@@ -31,6 +32,15 @@ OAUTH_TOKEN_PATH = Path(
 )
 GDOC_SHARE_EMAIL = os.environ.get("GDOC_SHARE_EMAIL", "joshuajbudd@gmail.com")
 GDOC_FOLDER_ID = os.environ.get("GDOC_FOLDER_ID", "1WUi1Ty1ghheHQPdQhbieLp5NN2Jt1CJt")
+
+# Centralized OAuth scopes -- all Google API access uses this single list.
+# Adding a scope here requires a one-time re-auth (delete the token file).
+OAUTH_SCOPES = [
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+]
 
 # Scraping constants
 SCRAPE_TIMEOUT = 30  # seconds
@@ -99,6 +109,60 @@ FORGE_MASTERY_LEVELS = [
     ("Inferno", 0.80),
     ("Forged", 0.95),
 ]
+
+# v2: Confidence-weighted mastery deltas (4 quadrants)
+FORGE_MASTERY_DELTAS_V2 = {
+    "correct_confident": 0.20,
+    "correct_unsure": 0.10,
+    "incorrect_confident": -0.15,
+    "incorrect_unsure": -0.05,
+    "skipped": 0.0,
+}
+
+# Bloom's revised taxonomy levels (ascending cognitive complexity)
+FORGE_BLOOM_LEVELS = ["remember", "understand", "apply", "analyze"]
+
+# Error classification types
+FORGE_ERROR_TYPES = ["slip", "lapse", "mistake", "misconception"]
+
+# Prerequisite mastery threshold before dependent concept unlocks
+FORGE_PREREQ_THRESHOLD = 0.40
+
+# Readiness scoring weights
+FORGE_READINESS_WEIGHTS = {
+    "mastery": 0.50,
+    "coverage": 0.25,
+    "calibration": 0.15,
+    "recency": 0.10,
+}
+
+# Memory consolidation constants
+CONSOLIDATION_DEFAULT_SIMILARITY = 0.80   # min cosine similarity for clustering
+CONSOLIDATION_DUPLICATE_THRESHOLD = 0.92  # near-exact duplicate detection
+CONSOLIDATION_MAX_CLUSTER_SIZE = 10       # max memories per cluster
+
+# Knowledge graph constants
+GRAPH_ENTITY_TYPES = [
+    "person", "project", "tool", "skill", "company",
+    "concept", "location", "organization",
+]
+GRAPH_RELATIONSHIP_TYPES = [
+    "uses", "knows", "related_to", "part_of", "depends_on",
+    "works_at", "created_by", "collaborates_with", "learned_from",
+]
+GRAPH_DEFAULT_DEPTH = 1
+GRAPH_MAX_DEPTH = 3
+
+# Homelab project paths (file-based, not in SQLite)
+HOMELAB_ROOT = Path(os.path.expanduser("~")) / "projects" / "homelab"
+HOMELAB_NOTES_DIR = HOMELAB_ROOT / "notes"
+HOMELAB_JOURNAL_DIR = HOMELAB_NOTES_DIR / "Journal"
+HOMELAB_JOURNAL_INDEX = HOMELAB_JOURNAL_DIR / "JOURNAL_INDEX.md"
+HOMELAB_CODEX_PATH = HOMELAB_NOTES_DIR / "LABSCRIBE_CODEX.md"
+HOMELAB_NEXUS_PATH = HOMELAB_NOTES_DIR / "LAB_NEXUS.md"
+HOMELAB_TOOLS_CSV = HOMELAB_ROOT / "HOMELAB_TOOLS_INVENTORY.csv"
+HOMELAB_ATTACHMENTS_DIR = HOMELAB_JOURNAL_DIR / "attachments"
+HOMELAB_JOURNAL_FILENAME = "JJ Budd's Learn Out Loud Lab_{date}.md"
 
 
 def ensure_data_dirs() -> None:

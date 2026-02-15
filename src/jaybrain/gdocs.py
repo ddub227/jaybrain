@@ -29,12 +29,9 @@ def _get_credentials():
         from google.oauth2.credentials import Credentials
         from google_auth_oauthlib.flow import InstalledAppFlow
 
-        from .config import OAUTH_CLIENT_PATH, OAUTH_TOKEN_PATH
+        from .config import OAUTH_CLIENT_PATH, OAUTH_SCOPES, OAUTH_TOKEN_PATH
 
-        scopes = [
-            "https://www.googleapis.com/auth/documents",
-            "https://www.googleapis.com/auth/drive",
-        ]
+        scopes = OAUTH_SCOPES
 
         creds = None
 

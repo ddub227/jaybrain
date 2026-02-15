@@ -212,6 +212,20 @@ class ReviewOutcome(str, Enum):
     SKIPPED = "skipped"
 
 
+class BloomLevel(str, Enum):
+    REMEMBER = "remember"
+    UNDERSTAND = "understand"
+    APPLY = "apply"
+    ANALYZE = "analyze"
+
+
+class ErrorType(str, Enum):
+    SLIP = "slip"
+    LAPSE = "lapse"
+    MISTAKE = "mistake"
+    MISCONCEPTION = "misconception"
+
+
 class Concept(BaseModel):
     id: str
     term: str
@@ -267,6 +281,62 @@ class ForgeStats(BaseModel):
     avg_mastery: float = 0.0
     current_streak: int = 0
     longest_streak: int = 0
+
+
+class Subject(BaseModel):
+    id: str
+    name: str
+    short_name: str
+    description: str = ""
+    pass_score: float = 0.0
+    total_questions: int = 0
+    time_limit_minutes: int = 0
+    active: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+
+class Objective(BaseModel):
+    id: str
+    subject_id: str
+    code: str
+    title: str
+    domain: str = ""
+    exam_weight: float = 0.0
+    created_at: datetime
+
+
+class ErrorPattern(BaseModel):
+    id: int
+    concept_id: str
+    error_type: ErrorType
+    details: str = ""
+    bloom_level: str = ""
+    created_at: datetime
+
+
+class ReadinessScore(BaseModel):
+    overall: float
+    by_domain: dict[str, float] = Field(default_factory=dict)
+    by_objective: dict[str, float] = Field(default_factory=dict)
+    weakest_areas: list[str] = Field(default_factory=list)
+    total_concepts: int = 0
+    reviewed_concepts: int = 0
+    coverage: float = 0.0
+    avg_mastery: float = 0.0
+    calibration_score: float = 0.0
+    recommendation: str = ""
+
+
+class CalibrationData(BaseModel):
+    total_reviews: int = 0
+    confident_correct: int = 0
+    confident_incorrect: int = 0
+    unsure_correct: int = 0
+    unsure_incorrect: int = 0
+    calibration_score: float = 0.0
+    overconfidence_rate: float = 0.0
+    underconfidence_rate: float = 0.0
 
 
 # --- Job Hunt Enums ---
@@ -392,6 +462,55 @@ class Application(BaseModel):
 
 
 # --- Interview Prep Models ---
+
+# --- Knowledge Graph Models ---
+
+class EntityType(str, Enum):
+    PERSON = "person"
+    PROJECT = "project"
+    TOOL = "tool"
+    SKILL = "skill"
+    COMPANY = "company"
+    CONCEPT = "concept"
+    LOCATION = "location"
+    ORGANIZATION = "organization"
+
+
+class RelationshipType(str, Enum):
+    USES = "uses"
+    KNOWS = "knows"
+    RELATED_TO = "related_to"
+    PART_OF = "part_of"
+    DEPENDS_ON = "depends_on"
+    WORKS_AT = "works_at"
+    CREATED_BY = "created_by"
+    COLLABORATES_WITH = "collaborates_with"
+    LEARNED_FROM = "learned_from"
+
+
+class GraphEntity(BaseModel):
+    id: str
+    name: str
+    entity_type: EntityType
+    description: str = ""
+    aliases: list[str] = Field(default_factory=list)
+    memory_ids: list[str] = Field(default_factory=list)
+    properties: dict[str, str] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class GraphRelationship(BaseModel):
+    id: str
+    source_entity_id: str
+    target_entity_id: str
+    rel_type: RelationshipType
+    weight: float = 1.0
+    evidence_ids: list[str] = Field(default_factory=list)
+    properties: dict[str, str] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
 
 class InterviewPrepCreate(BaseModel):
     application_id: str = Field(..., description="Application ID")

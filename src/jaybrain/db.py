@@ -59,6 +59,90 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE memories ADD COLUMN session_id TEXT")
         conn.commit()
 
+    # Backfill orphaned memories: assign session_id by nearest session timestamp
+    orphans = conn.execute(
+        "SELECT id, created_at FROM memories WHERE session_id IS NULL"
+    ).fetchall()
+    if orphans:
+        sessions = conn.execute(
+            "SELECT id, started_at FROM sessions ORDER BY started_at DESC"
+        ).fetchall()
+        if sessions:
+            for mem in orphans:
+                # Find the nearest session by timestamp
+                best_sid = sessions[0]["id"]
+                best_diff = float("inf")
+                for s in sessions:
+                    try:
+                        m_dt = datetime.fromisoformat(mem["created_at"])
+                        s_dt = datetime.fromisoformat(s["started_at"])
+                        diff = abs((m_dt - s_dt).total_seconds())
+                        if diff < best_diff:
+                            best_diff = diff
+                            best_sid = s["id"]
+                    except (ValueError, TypeError):
+                        continue
+                conn.execute(
+                    "UPDATE memories SET session_id = ? WHERE id = ?",
+                    (best_sid, mem["id"]),
+                )
+            conn.commit()
+
+    # v2: Add subject_id and bloom_level to forge_concepts
+    forge_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(forge_concepts)").fetchall()
+    }
+    if forge_cols:  # table exists
+        if "subject_id" not in forge_cols:
+            conn.execute("ALTER TABLE forge_concepts ADD COLUMN subject_id TEXT DEFAULT ''")
+            conn.commit()
+        if "bloom_level" not in forge_cols:
+            conn.execute("ALTER TABLE forge_concepts ADD COLUMN bloom_level TEXT DEFAULT 'remember'")
+            conn.commit()
+
+    # v2: Add columns to forge_reviews
+    review_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(forge_reviews)").fetchall()
+    }
+    if review_cols:  # table exists
+        if "was_correct" not in review_cols:
+            conn.execute("ALTER TABLE forge_reviews ADD COLUMN was_correct INTEGER DEFAULT NULL")
+            conn.commit()
+        if "error_type" not in review_cols:
+            conn.execute("ALTER TABLE forge_reviews ADD COLUMN error_type TEXT DEFAULT ''")
+            conn.commit()
+        if "bloom_level" not in review_cols:
+            conn.execute("ALTER TABLE forge_reviews ADD COLUMN bloom_level TEXT DEFAULT ''")
+            conn.commit()
+        if "subject_id" not in review_cols:
+            conn.execute("ALTER TABLE forge_reviews ADD COLUMN subject_id TEXT DEFAULT ''")
+            conn.commit()
+
+    # Add queue_position column to tasks for prioritized task queue
+    task_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+    }
+    if "queue_position" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN queue_position INTEGER DEFAULT NULL")
+        conn.commit()
+
+    # Add checkpoint columns to sessions for context loss prevention
+    session_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+    }
+    if "checkpoint_summary" not in session_cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_summary TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    if "checkpoint_decisions" not in session_cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_decisions TEXT NOT NULL DEFAULT '[]'")
+        conn.commit()
+    if "checkpoint_next_steps" not in session_cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_next_steps TEXT NOT NULL DEFAULT '[]'")
+        conn.commit()
+    if "checkpoint_at" not in session_cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_at TEXT")
+        conn.commit()
+
 
 SCHEMA_SQL = f"""
 -- Memories table
@@ -372,6 +456,137 @@ CREATE TABLE IF NOT EXISTS interview_prep (
 
 CREATE INDEX IF NOT EXISTS idx_interview_prep_app ON interview_prep(application_id);
 CREATE INDEX IF NOT EXISTS idx_interview_prep_type ON interview_prep(prep_type);
+
+-- SynapseForge v2: Subjects
+CREATE TABLE IF NOT EXISTS forge_subjects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    short_name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    pass_score REAL NOT NULL DEFAULT 0.0,
+    total_questions INTEGER NOT NULL DEFAULT 0,
+    time_limit_minutes INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- SynapseForge v2: Objectives
+CREATE TABLE IF NOT EXISTS forge_objectives (
+    id TEXT PRIMARY KEY,
+    subject_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    title TEXT NOT NULL,
+    domain TEXT NOT NULL DEFAULT '',
+    exam_weight REAL NOT NULL DEFAULT 0.0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (subject_id) REFERENCES forge_subjects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_forge_objectives_subject ON forge_objectives(subject_id);
+
+-- SynapseForge v2: Concept-to-Objective mapping
+CREATE TABLE IF NOT EXISTS forge_concept_objectives (
+    concept_id TEXT NOT NULL,
+    objective_id TEXT NOT NULL,
+    PRIMARY KEY (concept_id, objective_id),
+    FOREIGN KEY (concept_id) REFERENCES forge_concepts(id) ON DELETE CASCADE,
+    FOREIGN KEY (objective_id) REFERENCES forge_objectives(id) ON DELETE CASCADE
+);
+
+-- SynapseForge v2: Prerequisites DAG
+CREATE TABLE IF NOT EXISTS forge_prerequisites (
+    concept_id TEXT NOT NULL,
+    prerequisite_id TEXT NOT NULL,
+    PRIMARY KEY (concept_id, prerequisite_id),
+    FOREIGN KEY (concept_id) REFERENCES forge_concepts(id) ON DELETE CASCADE,
+    FOREIGN KEY (prerequisite_id) REFERENCES forge_concepts(id) ON DELETE CASCADE
+);
+
+-- SynapseForge v2: Error patterns
+CREATE TABLE IF NOT EXISTS forge_error_patterns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    concept_id TEXT NOT NULL,
+    error_type TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    bloom_level TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (concept_id) REFERENCES forge_concepts(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_forge_errors_concept ON forge_error_patterns(concept_id);
+CREATE INDEX IF NOT EXISTS idx_forge_errors_type ON forge_error_patterns(error_type);
+
+-- Memory archive (soft-deleted memories preserved for audit)
+CREATE TABLE IF NOT EXISTS memory_archive (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'semantic',
+    tags TEXT NOT NULL DEFAULT '[]',
+    importance REAL NOT NULL DEFAULT 0.5,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    session_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archive_reason TEXT NOT NULL DEFAULT '',
+    merged_into_id TEXT,
+    consolidation_run_id TEXT,
+    archived_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_archive_reason ON memory_archive(archive_reason);
+CREATE INDEX IF NOT EXISTS idx_memory_archive_merged ON memory_archive(merged_into_id);
+CREATE INDEX IF NOT EXISTS idx_memory_archive_date ON memory_archive(archived_at);
+
+-- Consolidation log (audit trail for merge/archive operations)
+CREATE TABLE IF NOT EXISTS consolidation_log (
+    id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    source_memory_ids TEXT NOT NULL DEFAULT '[]',
+    result_memory_id TEXT,
+    merged_content_preview TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_consolidation_log_action ON consolidation_log(action);
+CREATE INDEX IF NOT EXISTS idx_consolidation_log_date ON consolidation_log(created_at);
+
+-- Knowledge graph: entities
+CREATE TABLE IF NOT EXISTS graph_entities (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    aliases TEXT NOT NULL DEFAULT '[]',
+    memory_ids TEXT NOT NULL DEFAULT '[]',
+    properties TEXT NOT NULL DEFAULT '{{}}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_entities_name ON graph_entities(name);
+CREATE INDEX IF NOT EXISTS idx_graph_entities_type ON graph_entities(entity_type);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_entities_name_type ON graph_entities(name, entity_type);
+
+-- Knowledge graph: relationships
+CREATE TABLE IF NOT EXISTS graph_relationships (
+    id TEXT PRIMARY KEY,
+    source_entity_id TEXT NOT NULL,
+    target_entity_id TEXT NOT NULL,
+    rel_type TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    evidence_ids TEXT NOT NULL DEFAULT '[]',
+    properties TEXT NOT NULL DEFAULT '{{}}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (source_entity_id) REFERENCES graph_entities(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_entity_id) REFERENCES graph_entities(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_rel_source ON graph_relationships(source_entity_id);
+CREATE INDEX IF NOT EXISTS idx_graph_rel_target ON graph_relationships(target_entity_id);
+CREATE INDEX IF NOT EXISTS idx_graph_rel_type ON graph_relationships(rel_type);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_rel_unique ON graph_relationships(source_entity_id, target_entity_id, rel_type);
 """
 
 
@@ -600,6 +815,45 @@ def get_session(conn: sqlite3.Connection, session_id: str) -> Optional[sqlite3.R
     return conn.execute(
         "SELECT * FROM sessions WHERE id = ?", (session_id,)
     ).fetchone()
+
+
+def get_open_sessions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Get all sessions that were started but never ended (orphans)."""
+    return conn.execute(
+        "SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC"
+    ).fetchall()
+
+
+def update_session_checkpoint(
+    conn: sqlite3.Connection,
+    session_id: str,
+    checkpoint_summary: str,
+    checkpoint_decisions: list[str],
+    checkpoint_next_steps: list[str],
+) -> bool:
+    """Save a rolling checkpoint on an open session. Returns True if found."""
+    cursor = conn.execute(
+        """UPDATE sessions
+        SET checkpoint_summary = ?, checkpoint_decisions = ?,
+            checkpoint_next_steps = ?, checkpoint_at = ?
+        WHERE id = ? AND ended_at IS NULL""",
+        (checkpoint_summary, json.dumps(checkpoint_decisions),
+         json.dumps(checkpoint_next_steps), now_iso(), session_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def get_memories_for_session(
+    conn: sqlite3.Connection,
+    session_id: str,
+    limit: int = 20,
+) -> list[sqlite3.Row]:
+    """Get memories created during a specific session."""
+    return conn.execute(
+        "SELECT * FROM memories WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+        (session_id, limit),
+    ).fetchall()
 
 
 # --- Knowledge CRUD ---
@@ -852,14 +1106,23 @@ def insert_forge_review(
     confidence: int,
     time_spent_seconds: int = 0,
     notes: str = "",
+    was_correct: Optional[int | bool] = None,
+    error_type: str = "",
+    bloom_level: str = "",
+    subject_id: str = "",
 ) -> int:
     """Insert a review record. Returns the review ID."""
     now = now_iso()
+    was_correct_int = None
+    if was_correct is not None:
+        was_correct_int = 1 if was_correct else 0
     cursor = conn.execute(
         """INSERT INTO forge_reviews
-        (concept_id, outcome, confidence, time_spent_seconds, notes, reviewed_at)
-        VALUES (?, ?, ?, ?, ?, ?)""",
-        (concept_id, outcome, confidence, time_spent_seconds, notes, now),
+        (concept_id, outcome, confidence, time_spent_seconds, notes, reviewed_at,
+         was_correct, error_type, bloom_level, subject_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (concept_id, outcome, confidence, time_spent_seconds, notes, now,
+         was_correct_int, error_type, bloom_level, subject_id),
     )
     conn.commit()
     return cursor.lastrowid
@@ -910,6 +1173,196 @@ def get_forge_streak_data(
         ORDER BY date DESC
         LIMIT ?""",
         (limit,),
+    ).fetchall()
+
+
+# --- SynapseForge v2 CRUD ---
+
+def insert_forge_subject(
+    conn: sqlite3.Connection,
+    subject_id: str,
+    name: str,
+    short_name: str,
+    description: str = "",
+    pass_score: float = 0.0,
+    total_questions: int = 0,
+    time_limit_minutes: int = 0,
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO forge_subjects
+        (id, name, short_name, description, pass_score, total_questions,
+         time_limit_minutes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (subject_id, name, short_name, description, pass_score,
+         total_questions, time_limit_minutes, now, now),
+    )
+    conn.commit()
+
+
+def get_forge_subject(conn: sqlite3.Connection, subject_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM forge_subjects WHERE id = ?", (subject_id,)
+    ).fetchone()
+
+
+def list_forge_subjects(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM forge_subjects ORDER BY created_at DESC"
+    ).fetchall()
+
+
+def insert_forge_objective(
+    conn: sqlite3.Connection,
+    objective_id: str,
+    subject_id: str,
+    code: str,
+    title: str,
+    domain: str = "",
+    exam_weight: float = 0.0,
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT OR IGNORE INTO forge_objectives
+        (id, subject_id, code, title, domain, exam_weight, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (objective_id, subject_id, code, title, domain, exam_weight, now),
+    )
+    conn.commit()
+
+
+def get_forge_objectives(
+    conn: sqlite3.Connection, subject_id: str
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM forge_objectives WHERE subject_id = ? ORDER BY code",
+        (subject_id,),
+    ).fetchall()
+
+
+def get_forge_objective_by_code(
+    conn: sqlite3.Connection, subject_id: str, code: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM forge_objectives WHERE subject_id = ? AND code = ?",
+        (subject_id, code),
+    ).fetchone()
+
+
+def link_concept_objective(
+    conn: sqlite3.Connection, concept_id: str, objective_id: str
+) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO forge_concept_objectives (concept_id, objective_id) VALUES (?, ?)",
+        (concept_id, objective_id),
+    )
+    conn.commit()
+
+
+def get_concepts_for_objective(
+    conn: sqlite3.Connection, objective_id: str
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT fc.* FROM forge_concepts fc
+        JOIN forge_concept_objectives fco ON fc.id = fco.concept_id
+        WHERE fco.objective_id = ?
+        ORDER BY fc.mastery_level ASC""",
+        (objective_id,),
+    ).fetchall()
+
+
+def get_objectives_for_concept(
+    conn: sqlite3.Connection, concept_id: str
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT fo.* FROM forge_objectives fo
+        JOIN forge_concept_objectives fco ON fo.id = fco.objective_id
+        WHERE fco.concept_id = ?
+        ORDER BY fo.code""",
+        (concept_id,),
+    ).fetchall()
+
+
+def insert_forge_prerequisite(
+    conn: sqlite3.Connection, concept_id: str, prerequisite_id: str
+) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO forge_prerequisites (concept_id, prerequisite_id) VALUES (?, ?)",
+        (concept_id, prerequisite_id),
+    )
+    conn.commit()
+
+
+def get_prerequisites(
+    conn: sqlite3.Connection, concept_id: str
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT fc.* FROM forge_concepts fc
+        JOIN forge_prerequisites fp ON fc.id = fp.prerequisite_id
+        WHERE fp.concept_id = ?""",
+        (concept_id,),
+    ).fetchall()
+
+
+def insert_forge_error_pattern(
+    conn: sqlite3.Connection,
+    concept_id: str,
+    error_type: str,
+    details: str = "",
+    bloom_level: str = "",
+) -> int:
+    now = now_iso()
+    cursor = conn.execute(
+        """INSERT INTO forge_error_patterns
+        (concept_id, error_type, details, bloom_level, created_at)
+        VALUES (?, ?, ?, ?, ?)""",
+        (concept_id, error_type, details, bloom_level, now),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_error_patterns(
+    conn: sqlite3.Connection,
+    concept_id: str = "",
+    error_type: str = "",
+    subject_id: str = "",
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    conditions = []
+    params: list = []
+    if concept_id:
+        conditions.append("ep.concept_id = ?")
+        params.append(concept_id)
+    if error_type:
+        conditions.append("ep.error_type = ?")
+        params.append(error_type)
+    if subject_id:
+        conditions.append("""ep.concept_id IN (
+            SELECT concept_id FROM forge_concept_objectives fco
+            JOIN forge_objectives fo ON fo.id = fco.objective_id
+            WHERE fo.subject_id = ?)""")
+        params.append(subject_id)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    params.append(limit)
+    return conn.execute(
+        f"""SELECT ep.* FROM forge_error_patterns ep
+        {where}
+        ORDER BY ep.created_at DESC LIMIT ?""",
+        params,
+    ).fetchall()
+
+
+def get_forge_reviews_for_subject(
+    conn: sqlite3.Connection,
+    subject_id: str,
+    limit: int = 1000,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT fr.* FROM forge_reviews fr
+        WHERE fr.subject_id = ?
+        ORDER BY fr.reviewed_at DESC LIMIT ?""",
+        (subject_id, limit),
     ).fetchall()
 
 
@@ -1130,3 +1583,394 @@ def get_interview_prep_for_app(
         "SELECT * FROM interview_prep WHERE application_id = ? ORDER BY created_at DESC",
         (application_id,),
     ).fetchall()
+
+
+# --- Memory Archive CRUD ---
+
+def archive_memory(
+    conn: sqlite3.Connection,
+    memory_id: str,
+    archive_reason: str,
+    merged_into_id: Optional[str] = None,
+    consolidation_run_id: Optional[str] = None,
+) -> bool:
+    """Move a memory from memories to memory_archive. Returns True if found."""
+    row = get_memory(conn, memory_id)
+    if row is None:
+        return False
+
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO memory_archive
+        (id, content, category, tags, importance, access_count, last_accessed,
+         session_id, created_at, updated_at,
+         archive_reason, merged_into_id, consolidation_run_id, archived_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (row["id"], row["content"], row["category"], row["tags"],
+         row["importance"], row["access_count"], row["last_accessed"],
+         row["session_id"], row["created_at"], row["updated_at"],
+         archive_reason, merged_into_id, consolidation_run_id, now),
+    )
+    delete_memory(conn, memory_id)
+    return True
+
+
+def get_archived_memories(
+    conn: sqlite3.Connection,
+    reason: Optional[str] = None,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    """List archived memories, optionally filtered by reason."""
+    if reason:
+        return conn.execute(
+            "SELECT * FROM memory_archive WHERE archive_reason = ? ORDER BY archived_at DESC LIMIT ?",
+            (reason, limit),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM memory_archive ORDER BY archived_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+
+def get_all_memory_embeddings(
+    conn: sqlite3.Connection,
+    category: Optional[str] = None,
+    max_age_days: Optional[int] = None,
+) -> list[tuple[str, bytes]]:
+    """Fetch all (id, embedding_bytes) pairs from memories_vec.
+
+    Optionally filter by category and age via joins.
+    """
+    conditions = []
+    params: list = []
+    joins = ""
+
+    if category or max_age_days is not None:
+        joins = "JOIN memories m ON mv.id = m.id"
+        if category:
+            conditions.append("m.category = ?")
+            params.append(category)
+        if max_age_days is not None:
+            from datetime import timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+            conditions.append("m.created_at >= ?")
+            params.append(cutoff)
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    rows = conn.execute(
+        f"SELECT mv.id, mv.embedding FROM memories_vec mv {joins} {where}",
+        params,
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
+# --- Consolidation Log CRUD ---
+
+def insert_consolidation_log(
+    conn: sqlite3.Connection,
+    log_id: str,
+    action: str,
+    source_memory_ids: list[str],
+    result_memory_id: Optional[str] = None,
+    merged_content_preview: str = "",
+    reason: str = "",
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO consolidation_log
+        (id, action, source_memory_ids, result_memory_id, merged_content_preview, reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (log_id, action, json.dumps(source_memory_ids), result_memory_id,
+         merged_content_preview, reason, now),
+    )
+    conn.commit()
+
+
+def get_consolidation_log(
+    conn: sqlite3.Connection,
+    action: Optional[str] = None,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    if action:
+        return conn.execute(
+            "SELECT * FROM consolidation_log WHERE action = ? ORDER BY created_at DESC LIMIT ?",
+            (action, limit),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM consolidation_log ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+
+# --- Graph Entity CRUD ---
+
+def insert_graph_entity(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    name: str,
+    entity_type: str,
+    description: str = "",
+    aliases: Optional[list[str]] = None,
+    memory_ids: Optional[list[str]] = None,
+    properties: Optional[dict] = None,
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO graph_entities
+        (id, name, entity_type, description, aliases, memory_ids, properties, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (entity_id, name, entity_type, description,
+         json.dumps(aliases or []), json.dumps(memory_ids or []),
+         json.dumps(properties or {}), now, now),
+    )
+    conn.commit()
+
+
+def update_graph_entity(conn: sqlite3.Connection, entity_id: str, **fields) -> bool:
+    if not fields:
+        return False
+    for json_field in ("aliases", "memory_ids", "properties"):
+        if json_field in fields:
+            fields[json_field] = json.dumps(fields[json_field])
+    fields["updated_at"] = now_iso()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [entity_id]
+    cursor = conn.execute(
+        f"UPDATE graph_entities SET {set_clause} WHERE id = ?", values
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def get_graph_entity(conn: sqlite3.Connection, entity_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM graph_entities WHERE id = ?", (entity_id,)
+    ).fetchone()
+
+
+def get_graph_entity_by_name(
+    conn: sqlite3.Connection,
+    name: str,
+    entity_type: Optional[str] = None,
+) -> Optional[sqlite3.Row]:
+    """Find an entity by name (and optionally type). Case-insensitive."""
+    if entity_type:
+        return conn.execute(
+            "SELECT * FROM graph_entities WHERE LOWER(name) = LOWER(?) AND entity_type = ?",
+            (name, entity_type),
+        ).fetchone()
+    return conn.execute(
+        "SELECT * FROM graph_entities WHERE LOWER(name) = LOWER(?)",
+        (name,),
+    ).fetchone()
+
+
+def search_graph_entities(
+    conn: sqlite3.Connection,
+    query: str,
+    entity_type: Optional[str] = None,
+    limit: int = 20,
+) -> list[sqlite3.Row]:
+    conditions = ["(LOWER(name) LIKE LOWER(?) OR LOWER(aliases) LIKE LOWER(?))"]
+    params: list = [f"%{query}%", f"%{query}%"]
+    if entity_type:
+        conditions.append("entity_type = ?")
+        params.append(entity_type)
+    where = "WHERE " + " AND ".join(conditions)
+    params.append(limit)
+    return conn.execute(
+        f"SELECT * FROM graph_entities {where} ORDER BY updated_at DESC LIMIT ?",
+        params,
+    ).fetchall()
+
+
+def list_graph_entities(
+    conn: sqlite3.Connection,
+    entity_type: Optional[str] = None,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    if entity_type:
+        return conn.execute(
+            "SELECT * FROM graph_entities WHERE entity_type = ? ORDER BY name ASC LIMIT ?",
+            (entity_type, limit),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM graph_entities ORDER BY name ASC LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+
+def delete_graph_entity(conn: sqlite3.Connection, entity_id: str) -> bool:
+    cursor = conn.execute("DELETE FROM graph_entities WHERE id = ?", (entity_id,))
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+# --- Graph Relationship CRUD ---
+
+def insert_graph_relationship(
+    conn: sqlite3.Connection,
+    rel_id: str,
+    source_entity_id: str,
+    target_entity_id: str,
+    rel_type: str,
+    weight: float = 1.0,
+    evidence_ids: Optional[list[str]] = None,
+    properties: Optional[dict] = None,
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO graph_relationships
+        (id, source_entity_id, target_entity_id, rel_type, weight, evidence_ids, properties,
+         created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (rel_id, source_entity_id, target_entity_id, rel_type, weight,
+         json.dumps(evidence_ids or []), json.dumps(properties or {}), now, now),
+    )
+    conn.commit()
+
+
+def update_graph_relationship(conn: sqlite3.Connection, rel_id: str, **fields) -> bool:
+    if not fields:
+        return False
+    for json_field in ("evidence_ids", "properties"):
+        if json_field in fields:
+            fields[json_field] = json.dumps(fields[json_field])
+    fields["updated_at"] = now_iso()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [rel_id]
+    cursor = conn.execute(
+        f"UPDATE graph_relationships SET {set_clause} WHERE id = ?", values
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def get_graph_relationship_by_triple(
+    conn: sqlite3.Connection,
+    source_entity_id: str,
+    target_entity_id: str,
+    rel_type: str,
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        """SELECT * FROM graph_relationships
+        WHERE source_entity_id = ? AND target_entity_id = ? AND rel_type = ?""",
+        (source_entity_id, target_entity_id, rel_type),
+    ).fetchone()
+
+
+def get_entity_relationships(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    direction: str = "both",
+) -> list[sqlite3.Row]:
+    """Get all relationships involving an entity.
+
+    direction: 'outgoing', 'incoming', or 'both'.
+    """
+    if direction == "outgoing":
+        return conn.execute(
+            "SELECT * FROM graph_relationships WHERE source_entity_id = ?",
+            (entity_id,),
+        ).fetchall()
+    elif direction == "incoming":
+        return conn.execute(
+            "SELECT * FROM graph_relationships WHERE target_entity_id = ?",
+            (entity_id,),
+        ).fetchall()
+    return conn.execute(
+        """SELECT * FROM graph_relationships
+        WHERE source_entity_id = ? OR target_entity_id = ?""",
+        (entity_id, entity_id),
+    ).fetchall()
+
+
+# --- Task Queue CRUD ---
+
+def get_queue_tasks(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Get all queued tasks ordered by queue_position.
+
+    Only returns tasks with a queue_position that are not done/cancelled.
+    """
+    return conn.execute(
+        """SELECT * FROM tasks
+        WHERE queue_position IS NOT NULL
+          AND status NOT IN ('done', 'cancelled')
+        ORDER BY queue_position ASC""",
+    ).fetchall()
+
+
+def get_next_queue_task(conn: sqlite3.Connection) -> Optional[sqlite3.Row]:
+    """Get the task with the lowest queue_position (not done/cancelled)."""
+    return conn.execute(
+        """SELECT * FROM tasks
+        WHERE queue_position IS NOT NULL
+          AND status NOT IN ('done', 'cancelled')
+        ORDER BY queue_position ASC
+        LIMIT 1""",
+    ).fetchone()
+
+
+def get_max_queue_position(conn: sqlite3.Connection) -> int:
+    """Get the current maximum queue_position. Returns 0 if queue is empty."""
+    row = conn.execute(
+        """SELECT MAX(queue_position) as max_pos FROM tasks
+        WHERE queue_position IS NOT NULL
+          AND status NOT IN ('done', 'cancelled')"""
+    ).fetchone()
+    return row["max_pos"] or 0
+
+
+def set_queue_position(
+    conn: sqlite3.Connection, task_id: str, position: int
+) -> bool:
+    """Set a task's queue_position. Returns True if task was found."""
+    cursor = conn.execute(
+        "UPDATE tasks SET queue_position = ?, updated_at = ? WHERE id = ?",
+        (position, now_iso(), task_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def clear_queue_position(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Remove a task from the queue by setting queue_position to NULL."""
+    cursor = conn.execute(
+        "UPDATE tasks SET queue_position = NULL, updated_at = ? WHERE id = ?",
+        (now_iso(), task_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def shift_queue_positions(
+    conn: sqlite3.Connection, from_position: int, delta: int = 1
+) -> None:
+    """Shift all queue positions >= from_position by delta.
+
+    Used to make room when inserting at a specific position.
+    """
+    conn.execute(
+        """UPDATE tasks
+        SET queue_position = queue_position + ?,
+            updated_at = ?
+        WHERE queue_position IS NOT NULL
+          AND queue_position >= ?
+          AND status NOT IN ('done', 'cancelled')""",
+        (delta, now_iso(), from_position),
+    )
+    conn.commit()
+
+
+def reindex_queue(conn: sqlite3.Connection) -> None:
+    """Reindex queue positions to be sequential (1, 2, 3, ...).
+
+    Eliminates gaps from removed or completed tasks.
+    """
+    rows = get_queue_tasks(conn)
+    for i, row in enumerate(rows, start=1):
+        conn.execute(
+            "UPDATE tasks SET queue_position = ? WHERE id = ?",
+            (i, row["id"]),
+        )
+    conn.commit()

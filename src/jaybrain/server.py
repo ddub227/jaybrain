@@ -1,4 +1,4 @@
-"""MCP server entry point - all 33 tools for JayBrain."""
+"""MCP server entry point - all tools for JayBrain."""
 
 from __future__ import annotations
 
@@ -221,7 +221,7 @@ def task_update(
 
         task = modify_task(task_id, **fields)
         if task:
-            return json.dumps({
+            result = {
                 "status": "updated",
                 "task": {
                     "id": task.id,
@@ -229,7 +229,32 @@ def task_update(
                     "status": task.status.value,
                     "priority": task.priority.value,
                 },
-            })
+            }
+
+            # Auto-resurface: when a task is marked done/cancelled, remove it
+            # from the queue and suggest the next item
+            if status in ("done", "cancelled"):
+                try:
+                    from .queue import get_next_suggestion
+                    from .db import get_connection, clear_queue_position, reindex_queue
+
+                    conn = get_connection()
+                    try:
+                        clear_queue_position(conn, task_id)
+                        reindex_queue(conn)
+                    finally:
+                        conn.close()
+
+                    next_task = get_next_suggestion()
+                    if next_task:
+                        result["next_in_queue"] = next_task
+                        result["queue_hint"] = (
+                            f"Next up: {next_task['title']} (#{next_task['queue_position']})"
+                        )
+                except Exception:
+                    pass  # Queue suggestion is best-effort
+
+            return json.dumps(result)
         return json.dumps({"status": "not_found", "task_id": task_id})
     except Exception as e:
         logger.error("task_update failed: %s", e, exc_info=True)
@@ -267,6 +292,127 @@ def task_list(
         return json.dumps({"count": len(output), "tasks": output})
     except Exception as e:
         logger.error("task_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Task Queue Tools (7)
+# =============================================================================
+
+@mcp.tool()
+def queue_next() -> str:
+    """Returns the next task in the queue (lowest queue_position that's not done/cancelled).
+
+    This is the "what should I do next?" command.
+    """
+    from .queue import queue_next as _queue_next
+
+    try:
+        result = _queue_next()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("queue_next failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def queue_push(task_id: str, position: int | None = None) -> str:
+    """Add a task to the queue.
+
+    If position is None, adds to the end of the queue.
+    If position is given, inserts there and shifts others down.
+    """
+    from .queue import queue_push as _queue_push
+
+    try:
+        result = _queue_push(task_id, position)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("queue_push failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def queue_pop() -> str:
+    """Mark the current top task as in_progress and return it.
+
+    Removes it from the queue and sets its status to in_progress.
+    Use this to start working on the next queued task.
+    """
+    from .queue import queue_pop as _queue_pop
+
+    try:
+        result = _queue_pop()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("queue_pop failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def queue_reorder(task_ids: list[str]) -> str:
+    """Reorder the queue by providing task IDs in the desired order.
+
+    Tasks not in the provided list but currently in the queue
+    will be appended after the specified tasks.
+    """
+    from .queue import queue_reorder as _queue_reorder
+
+    try:
+        result = _queue_reorder(task_ids)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("queue_reorder failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def queue_view() -> str:
+    """Show the full task queue in order.
+
+    Displays all queued tasks sorted by position, excluding
+    done and cancelled tasks.
+    """
+    from .queue import queue_view as _queue_view
+
+    try:
+        result = _queue_view()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("queue_view failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def queue_defer(task_id: str) -> str:
+    """Move a task to the end of the queue (when going on a tangent).
+
+    Pushes the task to the back and shows what's next.
+    """
+    from .queue import queue_defer as _queue_defer
+
+    try:
+        result = _queue_defer(task_id)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("queue_defer failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def queue_bump(task_id: str) -> str:
+    """Move a task to position 1 (urgent).
+
+    Bumps the task to the front of the queue, shifting everything else down.
+    Works even if the task is not currently in the queue.
+    """
+    from .queue import queue_bump as _queue_bump
+
+    try:
+        result = _queue_bump(task_id)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("queue_bump failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
 
 
@@ -443,11 +589,14 @@ def forge_add(
     related_jaybrain_component: str = "",
     source: str = "",
     notes: str = "",
+    subject_id: str = "",
+    bloom_level: str = "remember",
 ) -> str:
     """Quick-capture a concept for spaced repetition learning.
 
     Categories: python, networking, mcp, databases, security, linux, git, ai_ml, web, devops, general.
     Difficulty: beginner, intermediate, advanced.
+    Bloom levels: remember, understand, apply, analyze.
     """
     from .forge import add_concept
 
@@ -455,6 +604,7 @@ def forge_add(
         concept = add_concept(
             term, definition, category, difficulty,
             tags or [], related_jaybrain_component, source, notes,
+            subject_id=subject_id, bloom_level=bloom_level,
         )
         return json.dumps({
             "status": "added",
@@ -476,16 +626,25 @@ def forge_review(
     confidence: int = 3,
     time_spent_seconds: int = 0,
     notes: str = "",
+    was_correct: bool | None = None,
+    error_type: str = "",
+    bloom_level: str = "",
 ) -> str:
     """Record a review outcome for a concept.
 
     Outcome: understood, reviewed, struggled, skipped.
     Confidence: 1-5 (1=no idea, 5=perfect recall).
+    v2: Pass was_correct (true/false) for confidence-weighted scoring.
+    Error types: slip, lapse, mistake, misconception (auto-classified if omitted).
+    Bloom levels: remember, understand, apply, analyze.
     """
     from .forge import record_review
 
     try:
-        concept = record_review(concept_id, outcome, confidence, time_spent_seconds, notes)
+        concept = record_review(
+            concept_id, outcome, confidence, time_spent_seconds, notes,
+            was_correct=was_correct, error_type=error_type, bloom_level=bloom_level,
+        )
         return json.dumps({
             "status": "reviewed",
             "concept_id": concept.id,
@@ -504,16 +663,17 @@ def forge_review(
 def forge_study(
     category: str | None = None,
     limit: int = 10,
+    subject_id: str | None = None,
 ) -> str:
     """Get a prioritized study queue.
 
-    Returns concepts in priority order: due_now > new > struggling > up_next.
-    Optionally filter by category.
+    Without subject_id: due_now > new > struggling > up_next ordering.
+    With subject_id: interleaved queue weighted by exam_weight * (1 - mastery).
     """
     from .forge import get_study_queue
 
     try:
-        queue = get_study_queue(category, limit)
+        queue = get_study_queue(category, limit, subject_id=subject_id)
         return json.dumps(queue)
     except Exception as e:
         logger.error("forge_study failed: %s", e, exc_info=True)
@@ -611,6 +771,143 @@ def forge_explain(concept_id: str) -> str:
         return json.dumps({"status": "not_found", "concept_id": concept_id})
     except Exception as e:
         logger.error("forge_explain failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# SynapseForge v2 Tools (7)
+# =============================================================================
+
+@mcp.tool()
+def forge_subject_create(
+    name: str,
+    short_name: str,
+    description: str = "",
+    pass_score: float = 0.0,
+    total_questions: int = 0,
+    time_limit_minutes: int = 0,
+) -> str:
+    """Create a new learning subject (e.g. an exam, a course).
+
+    pass_score: 0.0-1.0 (e.g. 0.833 for 750/900 on Security+).
+    """
+    from .forge import create_subject
+
+    try:
+        subject = create_subject(
+            name, short_name, description,
+            pass_score, total_questions, time_limit_minutes,
+        )
+        return json.dumps({"status": "created", **subject})
+    except Exception as e:
+        logger.error("forge_subject_create failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_subject_list() -> str:
+    """List all learning subjects with concept and objective counts."""
+    from .forge import get_subjects
+
+    try:
+        subjects = get_subjects()
+        return json.dumps({"count": len(subjects), "subjects": subjects})
+    except Exception as e:
+        logger.error("forge_subject_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_objective_add(
+    subject_id: str,
+    code: str,
+    title: str,
+    domain: str = "",
+    exam_weight: float = 0.0,
+) -> str:
+    """Add an exam objective to a subject.
+
+    code: e.g. '1.1', '2.3'. domain: e.g. '1.0 - General Security Concepts'.
+    exam_weight: domain weight as decimal (e.g. 0.12 for 12%).
+    """
+    from .forge import add_objective
+
+    try:
+        obj = add_objective(subject_id, code, title, domain, exam_weight)
+        return json.dumps({"status": "added", **obj})
+    except Exception as e:
+        logger.error("forge_objective_add failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_readiness(subject_id: str) -> str:
+    """Get exam readiness score with domain breakdown and recommendations.
+
+    Returns overall pass probability, per-domain and per-objective mastery,
+    weakest areas, coverage, calibration score, and study recommendation.
+    """
+    from .forge import calculate_readiness
+
+    try:
+        readiness = calculate_readiness(subject_id)
+        return json.dumps(readiness)
+    except Exception as e:
+        logger.error("forge_readiness failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_knowledge_map(subject_id: str) -> str:
+    """Generate a markdown knowledge map for a subject.
+
+    Shows all domains, objectives, and concepts organized hierarchically
+    with mastery bars, review counts, and error patterns.
+    """
+    from .forge import generate_knowledge_map
+
+    try:
+        markdown = generate_knowledge_map(subject_id)
+        return json.dumps({"status": "generated", "markdown": markdown})
+    except Exception as e:
+        logger.error("forge_knowledge_map failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_calibration(subject_id: str = "") -> str:
+    """Get calibration analytics: how well confidence predicts actual performance.
+
+    Returns 4-quadrant breakdown (confident+correct, confident+wrong,
+    unsure+correct, unsure+wrong), calibration score, and over/under-confidence rates.
+    """
+    from .forge import get_calibration
+
+    try:
+        cal = get_calibration(subject_id)
+        return json.dumps(cal)
+    except Exception as e:
+        logger.error("forge_calibration failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_errors(
+    subject_id: str = "",
+    concept_id: str = "",
+) -> str:
+    """Get error pattern analysis: misconceptions, slips, lapses, mistakes.
+
+    Filter by subject_id and/or concept_id. Shows error type distribution
+    and concepts with recurring errors.
+    """
+    from .forge import get_error_analysis
+
+    try:
+        analysis = get_error_analysis(subject_id, concept_id)
+        return json.dumps(analysis)
+    except Exception as e:
+        logger.error("forge_errors failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
 
 
@@ -1165,6 +1462,874 @@ def interview_prep_get(application_id: str) -> str:
         return json.dumps(result)
     except Exception as e:
         logger.error("interview_prep_get failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Memory Consolidation Tools (5)
+# =============================================================================
+
+@mcp.tool()
+def memory_find_clusters(
+    min_similarity: float = 0.80,
+    max_age_days: int | None = None,
+    category: str | None = None,
+    limit: int = 10,
+) -> str:
+    """Find clusters of semantically similar memories for review and merging.
+
+    Uses pairwise cosine similarity to group related memories.
+    Review the returned clusters, then call memory_merge() to consolidate.
+
+    min_similarity: 0.0-1.0 threshold (default 0.80).
+    max_age_days: only consider memories created within N days.
+    """
+    from .consolidation import find_clusters
+
+    try:
+        clusters = find_clusters(min_similarity, max_age_days, category, limit)
+        return json.dumps({
+            "cluster_count": len(clusters),
+            "clusters": clusters,
+        })
+    except Exception as e:
+        logger.error("memory_find_clusters failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def memory_find_duplicates(
+    threshold: float = 0.92,
+    category: str | None = None,
+    limit: int = 20,
+) -> str:
+    """Find near-duplicate memory pairs above the similarity threshold.
+
+    Returns pairs sorted by similarity (highest first).
+    Use memory_merge() or memory_archive() to clean up duplicates.
+
+    threshold: 0.0-1.0 (default 0.92 for near-exact matches).
+    """
+    from .consolidation import find_duplicates
+
+    try:
+        pairs = find_duplicates(threshold, category, limit)
+        return json.dumps({
+            "pair_count": len(pairs),
+            "pairs": pairs,
+        })
+    except Exception as e:
+        logger.error("memory_find_duplicates failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def memory_merge(
+    memory_ids: list[str],
+    merged_content: str,
+    merged_tags: list[str] | None = None,
+    merged_importance: float | None = None,
+    reason: str = "",
+) -> str:
+    """Merge multiple memories into one consolidated memory.
+
+    Provide the merged_content (a rewritten summary combining the originals).
+    Original memories are archived with an audit trail.
+    Tags and importance are auto-derived from originals if not specified.
+    """
+    from .consolidation import merge_memories
+
+    try:
+        result = merge_memories(
+            memory_ids, merged_content, merged_tags, merged_importance, reason,
+        )
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("memory_merge failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def memory_archive(
+    memory_ids: list[str],
+    reason: str = "manual_archive",
+) -> str:
+    """Archive multiple memories (soft delete) without merging.
+
+    Archived memories are removed from search but preserved in the archive table.
+    Use for outdated, irrelevant, or superseded memories.
+    """
+    from .consolidation import archive_memories
+
+    try:
+        result = archive_memories(memory_ids, reason)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("memory_archive failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def memory_consolidation_stats() -> str:
+    """Get consolidation history: archive counts, merge logs, and action breakdown."""
+    from .consolidation import get_consolidation_stats
+
+    try:
+        result = get_consolidation_stats()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("memory_consolidation_stats failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Knowledge Graph Tools (5)
+# =============================================================================
+
+@mcp.tool()
+def graph_add_entity(
+    name: str,
+    entity_type: str,
+    description: str = "",
+    aliases: list[str] | None = None,
+    source_memory_ids: list[str] | None = None,
+    properties: dict | None = None,
+) -> str:
+    """Add or update an entity in the knowledge graph.
+
+    If an entity with the same name+type exists, merges aliases, memory_ids, and properties.
+    Entity types: person, project, tool, skill, company, concept, location, organization.
+    """
+    from .graph import add_entity
+
+    try:
+        result = add_entity(
+            name, entity_type, description,
+            aliases, source_memory_ids, properties,
+        )
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("graph_add_entity failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def graph_add_relationship(
+    source_entity: str,
+    target_entity: str,
+    rel_type: str,
+    weight: float = 1.0,
+    evidence_ids: list[str] | None = None,
+    properties: dict | None = None,
+) -> str:
+    """Add or update a relationship between two entities.
+
+    Entities can be referenced by ID or name. If the same triple exists, merges evidence and properties.
+    Relationship types: uses, knows, related_to, part_of, depends_on, works_at, created_by, collaborates_with, learned_from.
+    """
+    from .graph import add_relationship
+
+    try:
+        result = add_relationship(
+            source_entity, target_entity, rel_type,
+            weight, evidence_ids, properties,
+        )
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("graph_add_relationship failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def graph_query(
+    entity_name: str,
+    depth: int = 1,
+    entity_type: str | None = None,
+) -> str:
+    """Get an entity and its N-depth neighborhood via BFS traversal.
+
+    Returns the center entity, all connected entities within depth hops,
+    and all relationships between them. Max depth: 3.
+    """
+    from .graph import query_neighborhood
+
+    try:
+        result = query_neighborhood(entity_name, depth, entity_type)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("graph_query failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def graph_search(
+    query: str,
+    entity_type: str | None = None,
+    limit: int = 20,
+) -> str:
+    """Search entities by name substring."""
+    from .graph import search_entities
+
+    try:
+        results = search_entities(query, entity_type, limit)
+        return json.dumps({"count": len(results), "entities": results})
+    except Exception as e:
+        logger.error("graph_search failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def graph_list(
+    entity_type: str | None = None,
+    limit: int = 100,
+) -> str:
+    """List all entities in the knowledge graph, optionally filtered by type."""
+    from .graph import get_entities
+
+    try:
+        results = get_entities(entity_type, limit)
+        return json.dumps({"count": len(results), "entities": results})
+    except Exception as e:
+        logger.error("graph_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Homelab Tools (7)
+# =============================================================================
+
+@mcp.tool()
+def homelab_status() -> str:
+    """Quick stats, skills, SOC readiness, recent entries from the homelab journal.
+
+    Parses JOURNAL_INDEX.md for lab session count, skills progression,
+    SOC Analyst readiness checklist, and recent journal entries.
+    """
+    from .homelab import get_status
+
+    try:
+        result = get_status()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("homelab_status failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def homelab_journal_create(date: str, content: str) -> str:
+    """Create a journal entry file and update JOURNAL_INDEX.md.
+
+    Claude should read the Codex first (homelab_codex_read), compose the
+    full markdown entry following its rules, then pass the finished content here.
+    The tool handles file write, directory creation, and index update.
+
+    date: ISO date string (YYYY-MM-DD).
+    content: Full pre-formatted markdown content.
+    """
+    from .homelab import create_journal_entry
+
+    try:
+        result = create_journal_entry(date, content)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("homelab_journal_create failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def homelab_journal_list(limit: int = 10) -> str:
+    """List recent journal entries from JOURNAL_INDEX.md."""
+    from .homelab import list_journal_entries
+
+    try:
+        result = list_journal_entries(limit)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("homelab_journal_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def homelab_tools_list(status: str | None = None) -> str:
+    """Read HOMELAB_TOOLS_INVENTORY.csv, optionally filtered by status.
+
+    Status values: Deployed, Planned, Deprecated.
+    """
+    from .homelab import list_tools
+
+    try:
+        result = list_tools(status)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("homelab_tools_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def homelab_tools_add(
+    tool: str,
+    creator: str,
+    purpose: str,
+    status: str = "Deployed",
+) -> str:
+    """Add a new tool to HOMELAB_TOOLS_INVENTORY.csv.
+
+    Checks for duplicates before adding. Status: Deployed, Planned, Deprecated.
+    """
+    from .homelab import add_tool
+
+    try:
+        result = add_tool(tool, creator, purpose, status)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("homelab_tools_add failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def homelab_nexus_read() -> str:
+    """Read the full LAB_NEXUS.md infrastructure overview.
+
+    Contains network topology, VM specs, service inventory, and architecture diagrams.
+    """
+    from .homelab import read_nexus
+
+    try:
+        result = read_nexus()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("homelab_nexus_read failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def homelab_codex_read() -> str:
+    """Read the LABSCRIBE_CODEX.md formatting rules.
+
+    Contains journal entry structure, section templates, trigger commands,
+    and style rules. Read this before composing journal entries.
+    """
+    from .homelab import read_codex
+
+    try:
+        result = read_codex()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("homelab_codex_read failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Browser Automation Tools (8)
+# =============================================================================
+
+# =============================================================================
+# Pulse: Cross-Session Awareness Tools (3)
+# =============================================================================
+
+@mcp.tool()
+def pulse_active(stale_minutes: int = 60) -> str:
+    """List all active Claude Code sessions and what they're doing.
+
+    Shows session IDs, working directories, last tool used, and time since
+    last activity. Use this to see what other sessions are currently up to.
+
+    stale_minutes: sessions idle longer than this get a warning (default 60).
+    """
+    from .pulse import get_active_sessions
+
+    try:
+        result = get_active_sessions(stale_minutes)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("pulse_active failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def pulse_activity(session_id: str | None = None, limit: int = 20) -> str:
+    """Get recent activity stream across all sessions or a specific one.
+
+    Returns a chronological feed of tool calls with timestamps.
+    Omit session_id to see activity across ALL sessions.
+    """
+    from .pulse import get_session_activity
+
+    try:
+        result = get_session_activity(session_id, limit)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("pulse_activity failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def pulse_session(session_id: str) -> str:
+    """Get full details on a specific session: tool usage breakdown, recent activity.
+
+    Supports partial session ID matching.
+    """
+    from .pulse import query_session
+
+    try:
+        result = query_session(session_id)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("pulse_session failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def pulse_context(
+    session_id: str,
+    snippet: str = "",
+    last_n: int = 30,
+    context_window: int = 10,
+) -> str:
+    """Read another session's full conversation transcript. Codename: X-Ray.
+
+    Reads the JSONL transcript file from another Claude Code session and
+    returns the actual user/assistant conversation (filtered, no noise).
+
+    Two modes:
+    - Snippet mode: pass `snippet` text to find it in the transcript and
+      get surrounding context (context_window turns before and after).
+    - Recent mode: omit snippet to get the last `last_n` turns plus the
+      session opening (first 3 turns showing the session plan).
+
+    Supports partial session ID matching. Use pulse_active() first to
+    discover session IDs.
+    """
+    from .pulse import get_session_context
+
+    try:
+        result = get_session_context(
+            session_id,
+            snippet=snippet if snippet else None,
+            last_n=last_n,
+            context_window=context_window,
+        )
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("pulse_context (X-Ray) failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_launch(
+    headless: bool = True,
+    url: str = "",
+    stealth: bool = False,
+) -> str:
+    """Launch a Chromium browser instance.
+
+    headless: True for background operation, False for visible window.
+    url: Optional URL to navigate to immediately after launch.
+    stealth: Use Patchright anti-bot mode to bypass detection (requires: pip install patchright).
+    Requires: pip install jaybrain[render] && playwright install chromium
+    """
+    from .browser import launch_browser
+
+    try:
+        result = launch_browser(headless=headless, url=url, stealth=stealth)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_launch failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_navigate(url: str) -> str:
+    """Navigate the browser to a URL.
+
+    Waits for DOM content to load before returning.
+    """
+    from .browser import navigate
+
+    try:
+        result = navigate(url)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_navigate failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_snapshot() -> str:
+    """Get the page's accessibility tree with numbered element refs.
+
+    Returns a text representation of the page structure. Interactive
+    elements (links, buttons, inputs) get [ref] numbers you can pass
+    to browser_click() or browser_type().
+    """
+    from .browser import snapshot
+
+    try:
+        result = snapshot()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_snapshot failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_screenshot(full_page: bool = False) -> str:
+    """Take a screenshot of the current page.
+
+    Returns the file path to the saved PNG image.
+    Use the Read tool on the returned path to view the screenshot.
+    full_page: True to capture the entire scrollable page.
+    """
+    from .browser import take_screenshot
+
+    try:
+        result = take_screenshot(full_page=full_page)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_screenshot failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_click(
+    ref: int | None = None,
+    selector: str | None = None,
+) -> str:
+    """Click an element on the page.
+
+    ref: Element number from browser_snapshot() output (e.g. 3 for [3]).
+    selector: CSS selector as fallback (e.g. '#submit-btn').
+    Provide one of ref or selector.
+    """
+    from .browser import click
+
+    try:
+        result = click(ref=ref, selector=selector)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_click failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_type(
+    text: str,
+    ref: int | None = None,
+    selector: str | None = None,
+    clear: bool = True,
+) -> str:
+    """Type text into an input field.
+
+    text: The text to type.
+    ref: Element number from browser_snapshot() (e.g. 5 for [5]).
+    selector: CSS selector as fallback.
+    clear: If True (default), clears the field first. False to append.
+    """
+    from .browser import type_text
+
+    try:
+        result = type_text(text, ref=ref, selector=selector, clear=clear)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_type failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_press_key(key: str) -> str:
+    """Press a keyboard key.
+
+    Common keys: Enter, Tab, Escape, Backspace, ArrowDown, ArrowUp,
+    Space, Delete, Home, End, PageDown, PageUp.
+    Modifiers: Control+a, Shift+Tab, Alt+F4.
+    """
+    from .browser import press_key
+
+    try:
+        result = press_key(key)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_press_key failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_close() -> str:
+    """Close the browser and release all resources."""
+    from .browser import close_browser
+
+    try:
+        result = close_browser()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_close failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Browser Session & Advanced Tools (6)
+# =============================================================================
+
+@mcp.tool()
+def browser_session_save(name: str) -> str:
+    """Save the current browser session (cookies + localStorage) to a named file.
+
+    Use this to persist login state so you can restore it later
+    without re-authenticating.
+    """
+    from .browser import session_save
+
+    try:
+        result = session_save(name)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_session_save failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_session_load(
+    name: str,
+    headless: bool | None = None,
+    url: str = "",
+    stealth: bool | None = None,
+) -> str:
+    """Launch browser with a previously saved session (restores cookies + localStorage).
+
+    name: Session name used in browser_session_save().
+    headless: Override headless mode (None keeps previous setting).
+    url: Optional URL to navigate to after loading.
+    stealth: Use Patchright anti-bot mode (None keeps previous setting).
+    """
+    from .browser import session_load
+
+    try:
+        result = session_load(name, headless=headless, url=url, stealth=stealth)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_session_load failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_session_list() -> str:
+    """List all saved browser sessions with cookie counts and sizes."""
+    from .browser import session_list
+
+    try:
+        result = session_list()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_session_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_fill_from_bw(
+    item_name: str,
+    field: str = "password",
+    ref: int | None = None,
+    selector: str | None = None,
+) -> str:
+    """Securely fill a form field with a credential from Bitwarden CLI.
+
+    Fetches the credential and types it in one atomic operation.
+    The actual value never appears in the response or logs.
+
+    item_name: Bitwarden item name (e.g. 'github.com').
+    field: 'password', 'username', 'uri', or 'totp'.
+    ref: Element number from browser_snapshot().
+    selector: CSS selector as fallback.
+    Requires: bw CLI installed and vault unlocked (BW_SESSION set).
+    """
+    from .browser import fill_from_bw
+
+    try:
+        result = fill_from_bw(item_name, field, ref=ref, selector=selector)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_fill_from_bw failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_select_option(
+    ref: int | None = None,
+    selector: str | None = None,
+    value: str | None = None,
+    label: str | None = None,
+    index: int | None = None,
+) -> str:
+    """Select an option from a dropdown (<select> element).
+
+    ref/selector: Identify the dropdown.
+    Then provide ONE of: value (option value attr), label (visible text), or index (0-based).
+    """
+    from .browser import select_option
+
+    try:
+        result = select_option(
+            ref=ref, selector=selector,
+            value=value, label=label, index=index,
+        )
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_select_option failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_wait(
+    selector: str | None = None,
+    text: str | None = None,
+    state: str = "visible",
+    timeout: int = 10000,
+) -> str:
+    """Wait for an element or text to appear/disappear on the page.
+
+    selector: CSS selector to wait for.
+    text: Text content to wait for.
+    state: 'visible' (default), 'hidden', 'attached', 'detached'.
+    timeout: Max wait time in milliseconds (default 10000).
+    """
+    from .browser import wait_for
+
+    try:
+        result = wait_for(
+            selector=selector, text=text,
+            state=state, timeout=timeout,
+        )
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_wait failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_hover(
+    ref: int | None = None,
+    selector: str | None = None,
+) -> str:
+    """Hover over an element (useful for revealing dropdown menus or tooltips).
+
+    ref: Element number from browser_snapshot().
+    selector: CSS selector as fallback.
+    """
+    from .browser import hover
+
+    try:
+        result = hover(ref=ref, selector=selector)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_hover failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Browser Navigation, Tabs & JS Tools (7)
+# =============================================================================
+
+@mcp.tool()
+def browser_evaluate(expression: str) -> str:
+    """Evaluate a JavaScript expression in the page context.
+
+    Returns the result as a string. Useful for reading page state,
+    extracting data, or manipulating the DOM.
+    """
+    from .browser import evaluate_js
+
+    try:
+        result = evaluate_js(expression)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_evaluate failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_go_back() -> str:
+    """Navigate back in browser history (like clicking the back button)."""
+    from .browser import go_back
+
+    try:
+        result = go_back()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_go_back failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_go_forward() -> str:
+    """Navigate forward in browser history."""
+    from .browser import go_forward
+
+    try:
+        result = go_forward()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_go_forward failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_tab_list() -> str:
+    """List all open browser tabs with URLs and titles.
+
+    Shows which tab is currently active.
+    """
+    from .browser import tab_list
+
+    try:
+        result = tab_list()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_tab_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_tab_new(url: str = "") -> str:
+    """Open a new browser tab, optionally navigating to a URL.
+
+    The new tab becomes the active tab.
+    """
+    from .browser import tab_new
+
+    try:
+        result = tab_new(url=url)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_tab_new failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_tab_switch(index: int) -> str:
+    """Switch to a tab by index (use browser_tab_list to see indexes)."""
+    from .browser import tab_switch
+
+    try:
+        result = tab_switch(index)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_tab_switch failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def browser_tab_close(index: int | None = None) -> str:
+    """Close a tab by index, or close the current tab if no index given.
+
+    Automatically switches to the last remaining tab after closing.
+    """
+    from .browser import tab_close
+
+    try:
+        result = tab_close(index=index)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("browser_tab_close failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
 
 

@@ -38,3 +38,10 @@ models/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Temp files
+*.png
+.quiz_tmp
+.research_*
+jaybrain.db
+nul

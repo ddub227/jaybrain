@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import sqlite3
 import sys
 from datetime import datetime, date, timedelta, timezone
@@ -374,6 +375,187 @@ def collect_pipeline_tracker(creds) -> list[dict]:
     except Exception as e:
         logger.error("Failed to read pipeline tracker: %s", e)
         return []
+
+
+def collect_homelab() -> dict:
+    """Collect homelab journal data: past entries, present stats, future plans."""
+    try:
+        from .homelab import get_status, list_journal_entries
+        from .config import HOMELAB_JOURNAL_DIR, HOMELAB_JOURNAL_INDEX
+
+        # Past: last 3 journal entries
+        entries_data = list_journal_entries(limit=3)
+        past_entries = entries_data.get("entries", [])
+
+        # Present: quick stats + skills in progress
+        status = get_status()
+        quick_stats = status.get("quick_stats", {})
+        skills = status.get("skills", {})
+        in_progress_skills = skills.get("in_progress", [])
+
+        # Future: next steps from latest journal + priority queue from index
+        next_steps = []
+        if past_entries:
+            latest = past_entries[0]
+            link = latest.get("link", "")
+            if link:
+                # Try to read the latest journal file for ## Next Steps
+                for pattern in [f"{link}.md", f"JJ Budd's Learn Out Loud Lab_{latest.get('date', '')}.md"]:
+                    journal_file = HOMELAB_JOURNAL_DIR / pattern
+                    if journal_file.exists():
+                        try:
+                            content = journal_file.read_text(encoding="utf-8")
+                            # Extract ## Next Steps section
+                            ns_match = re.search(
+                                r"##\s*Next\s*Steps\s*\n(.*?)(?=\n##|\Z)",
+                                content, re.DOTALL | re.IGNORECASE,
+                            )
+                            if ns_match:
+                                for line in ns_match.group(1).strip().splitlines():
+                                    line = line.strip()
+                                    if line.startswith(("-", "*", "1", "2", "3", "4", "5")):
+                                        cleaned = re.sub(r"^[-*\d.)\s]+", "", line).strip()
+                                        if cleaned:
+                                            next_steps.append(cleaned)
+                        except Exception:
+                            pass
+                        break
+
+        # Priority queue from JOURNAL_INDEX.md
+        planned_queue = []
+        if HOMELAB_JOURNAL_INDEX.exists():
+            try:
+                idx_content = HOMELAB_JOURNAL_INDEX.read_text(encoding="utf-8")
+                # Parse the planned priority queue table (| # | Project | Track | ... |)
+                planned_match = re.search(
+                    r"###\s*Planned.*?\n\|.*?\n\|[-\s|]+\n(.*?)(?=\n###|\n##|\n\*\*Backlog|\Z)",
+                    idx_content, re.DOTALL | re.IGNORECASE,
+                )
+                if planned_match:
+                    for line in planned_match.group(1).strip().splitlines():
+                        line = line.strip()
+                        if line.startswith("|"):
+                            cols = [c.strip() for c in line.split("|")[1:-1]]
+                            # cols[0] = #, cols[1] = Project name
+                            if len(cols) >= 2 and cols[1]:
+                                planned_queue.append(cols[1])
+            except Exception:
+                pass
+
+        return {
+            "past_entries": past_entries,
+            "quick_stats": quick_stats,
+            "in_progress_skills": in_progress_skills,
+            "next_steps": next_steps[:5],
+            "planned_queue": planned_queue[:3],
+        }
+    except Exception as e:
+        logger.error("Failed to collect homelab data: %s", e)
+        return {"error": str(e)}
+
+
+def collect_calendar(creds) -> dict:
+    """Collect today's calendar events from Google Calendar."""
+    try:
+        from googleapiclient.discovery import build
+
+        service = build(
+            "calendar", "v3", credentials=creds, cache_discovery=False,
+        )
+
+        # Today's events: midnight to midnight in local time
+        now = datetime.now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = start_of_day + timedelta(days=1)
+
+        time_min = start_of_day.astimezone(timezone.utc).isoformat()
+        time_max = end_of_day.astimezone(timezone.utc).isoformat()
+
+        result = service.events().list(
+            calendarId="primary",
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute()
+
+        events = []
+        for event in result.get("items", []):
+            start = event.get("start", {})
+            end = event.get("end", {})
+            all_day = "date" in start and "dateTime" not in start
+
+            events.append({
+                "summary": event.get("summary", "(No title)"),
+                "start": start.get("dateTime", start.get("date", "")),
+                "end": end.get("dateTime", end.get("date", "")),
+                "location": event.get("location", ""),
+                "all_day": all_day,
+            })
+
+        return {"events": events, "count": len(events)}
+    except Exception as e:
+        logger.error("Failed to collect calendar events: %s", e)
+        return {"events": [], "count": 0, "error": str(e)}
+
+
+def collect_news() -> dict:
+    """Collect top headlines from NewsAPI (general + tech)."""
+    from .config import NEWSAPI_KEY, NEWSAPI_BASE_URL
+
+    if not NEWSAPI_KEY:
+        return {
+            "general": [], "tech": [],
+            "general_total": 0, "tech_total": 0,
+            "note": "NewsAPI key not configured. Set NEWSAPI_KEY env var.",
+        }
+
+    try:
+        import urllib.request
+        import urllib.error
+        import json as _json
+
+        headers = {"X-Api-Key": NEWSAPI_KEY}
+
+        def _fetch(category: str = "") -> dict:
+            params = "country=us&pageSize=10"
+            if category:
+                params += f"&category={category}"
+            url = f"{NEWSAPI_BASE_URL}/top-headlines?{params}"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return _json.loads(resp.read().decode())
+
+        general_resp = _fetch()
+        tech_resp = _fetch("technology")
+
+        def _parse_articles(resp: dict, limit: int = 3) -> tuple[list, int]:
+            articles = resp.get("articles", [])
+            total = resp.get("totalResults", len(articles))
+            parsed = []
+            for a in articles[:limit]:
+                parsed.append({
+                    "title": a.get("title", ""),
+                    "source": a.get("source", {}).get("name", ""),
+                    "description": (a.get("description") or "")[:120],
+                    "url": a.get("url", ""),
+                })
+            return parsed, total
+
+        general, general_total = _parse_articles(general_resp)
+        tech, tech_total = _parse_articles(tech_resp)
+
+        return {
+            "general": general, "tech": tech,
+            "general_total": general_total, "tech_total": tech_total,
+        }
+    except Exception as e:
+        logger.error("Failed to collect news: %s", e)
+        return {
+            "general": [], "tech": [],
+            "general_total": 0, "tech_total": 0,
+            "error": str(e),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +970,242 @@ def _build_deadlines_section(deadlines: list[dict]) -> str:
     </td></tr>"""
 
 
+def _build_homelab_section(data: dict) -> str:
+    """Build the homelab journal section: Past / Present / Future."""
+    if "error" in data:
+        return _section_header("Homelab") + f"""
+        <tr><td style="padding:4px 24px 16px 24px;">
+          <p style="color:{COLORS['text_light']}; font-style:italic;">
+            Homelab data unavailable: {data['error']}
+          </p>
+        </td></tr>"""
+
+    past = data.get("past_entries", [])
+    stats = data.get("quick_stats", {})
+    skills = data.get("in_progress_skills", [])
+    next_steps = data.get("next_steps", [])
+    planned = data.get("planned_queue", [])
+
+    # Past: recent entries mini table
+    past_html = ""
+    if past:
+        rows = ""
+        for entry in past:
+            rows += f"""
+            <tr>
+              <td style="padding:2px 8px 2px 0; font-size:12px; color:{COLORS['text_light']}; white-space:nowrap;">
+                {entry.get('date', '')}
+              </td>
+              <td style="padding:2px 0; font-size:12px;">{entry.get('title', '')}</td>
+            </tr>"""
+        past_html = f"""
+        <div style="margin-bottom:12px;">
+          <strong style="font-size:13px; color:{COLORS['text']};">Past</strong>
+          <table cellpadding="0" cellspacing="0" style="margin-top:4px;">{rows}</table>
+        </div>"""
+    else:
+        past_html = """
+        <div style="margin-bottom:12px;">
+          <strong style="font-size:13px;">Past</strong>
+          <p style="font-size:12px; color:#666; margin:4px 0;">No journal entries yet.</p>
+        </div>"""
+
+    # Present: stats badges + skills
+    stats_badges = ""
+    total_sessions = stats.get("Total Lab Sessions", stats.get("total_sessions", ""))
+    latest_entry = stats.get("Latest Entry", stats.get("latest_entry", ""))
+    if total_sessions:
+        stats_badges += _badge(f"{total_sessions} sessions", COLORS["info"]) + " "
+    if latest_entry:
+        stats_badges += _badge(f"Latest: {latest_entry}", COLORS["success"]) + " "
+
+    skills_html = ""
+    if skills:
+        skills_html = f'<br/><span style="font-size:12px; color:{COLORS["text_light"]};">In progress: {", ".join(skills)}</span>'
+
+    present_html = f"""
+    <div style="margin-bottom:12px;">
+      <strong style="font-size:13px; color:{COLORS['text']};">Present</strong>
+      <div style="margin-top:4px;">{stats_badges}{skills_html}</div>
+    </div>"""
+
+    # Future: planned queue + next steps
+    future_items = ""
+    if planned:
+        for i, item in enumerate(planned, 1):
+            future_items += f"""
+            <div style="margin:2px 0; font-size:12px;">
+              {_badge(f'#{i}', COLORS['accent'])}
+              <span style="margin-left:4px;">{item}</span>
+            </div>"""
+
+    next_items = ""
+    if next_steps:
+        for step in next_steps:
+            next_items += f"""
+            <div style="margin:2px 0; font-size:12px;">
+              {_badge('next', COLORS['high'])}
+              <span style="margin-left:4px;">{step}</span>
+            </div>"""
+
+    future_html = ""
+    if future_items or next_items:
+        future_html = f"""
+        <div>
+          <strong style="font-size:13px; color:{COLORS['text']};">Future</strong>
+          <div style="margin-top:4px;">{future_items}{next_items}</div>
+        </div>"""
+
+    return _section_header("Homelab") + f"""
+    <tr><td style="padding:4px 24px 16px 24px;">
+      {past_html}
+      {present_html}
+      {future_html}
+    </td></tr>"""
+
+
+def _build_calendar_section(data: dict) -> str:
+    """Build the calendar events section."""
+    events = data.get("events", [])
+    count = data.get("count", 0)
+
+    if "error" in data:
+        return _section_header("Today's Calendar") + f"""
+        <tr><td style="padding:4px 24px 16px 24px;">
+          <p style="color:{COLORS['critical']};">Could not load calendar: {data['error']}</p>
+        </td></tr>"""
+
+    if not events:
+        return _section_header("Today's Calendar") + """
+        <tr><td style="padding:4px 24px 16px 24px;">
+          <p style="color:#666; font-style:italic;">No events scheduled today.</p>
+        </td></tr>"""
+
+    rows_html = ""
+    # All-day events first
+    all_day = [e for e in events if e.get("all_day")]
+    timed = [e for e in events if not e.get("all_day")]
+
+    for e in all_day:
+        location_html = f' <span style="font-size:11px; color:{COLORS["text_light"]};">[{e["location"]}]</span>' if e.get("location") else ""
+        rows_html += f"""
+        <tr>
+          <td style="padding:6px 0; border-bottom:1px solid {COLORS['border']};">
+            {_badge('All day', COLORS['accent'])}
+            <strong style="margin-left:4px;">{e['summary']}</strong>{location_html}
+          </td>
+        </tr>"""
+
+    for e in timed:
+        try:
+            start_dt = datetime.fromisoformat(e["start"])
+            end_dt = datetime.fromisoformat(e["end"])
+            time_str = f"{start_dt.strftime('%I:%M %p').lstrip('0')} - {end_dt.strftime('%I:%M %p').lstrip('0')}"
+        except Exception:
+            time_str = e.get("start", "")
+
+        location_html = f' <span style="font-size:11px; color:{COLORS["text_light"]};">[{e["location"]}]</span>' if e.get("location") else ""
+        rows_html += f"""
+        <tr>
+          <td style="padding:6px 0; border-bottom:1px solid {COLORS['border']};">
+            <span style="font-size:12px; color:{COLORS['text_light']}; margin-right:8px;">{time_str}</span>
+            <strong>{e['summary']}</strong>{location_html}
+          </td>
+        </tr>"""
+
+    return _section_header("Today's Calendar") + f"""
+    <tr><td style="padding:4px 24px 16px 24px;">
+      <p style="margin:0 0 8px 0; color:{COLORS['text_light']};">
+        {_badge(f'{count} event{"s" if count != 1 else ""}', COLORS['accent'])}
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
+        {rows_html}
+      </table>
+    </td></tr>"""
+
+
+def _build_news_section(data: dict) -> str:
+    """Build the news headlines section."""
+    general = data.get("general", [])
+    tech = data.get("tech", [])
+    general_total = data.get("general_total", 0)
+    tech_total = data.get("tech_total", 0)
+    note = data.get("note", "")
+
+    if note:
+        return _section_header("News") + f"""
+        <tr><td style="padding:4px 24px 16px 24px;">
+          <p style="color:{COLORS['text_light']}; font-size:12px; font-style:italic;">{note}</p>
+        </td></tr>"""
+
+    if "error" in data:
+        return _section_header("News") + f"""
+        <tr><td style="padding:4px 24px 16px 24px;">
+          <p style="color:{COLORS['critical']};">Could not load news: {data['error']}</p>
+        </td></tr>"""
+
+    if not general and not tech:
+        return _section_header("News") + """
+        <tr><td style="padding:4px 24px 16px 24px;">
+          <p style="color:#666; font-style:italic;">No news available.</p>
+        </td></tr>"""
+
+    def _article_rows(articles: list, total: int) -> str:
+        html = ""
+        for a in articles:
+            source_badge = _badge(a.get("source", ""), "#6c757d") if a.get("source") else ""
+            title = a.get("title", "")
+            url = a.get("url", "")
+            desc = a.get("description", "")
+            title_html = f'<a href="{url}" style="color:{COLORS["accent"]}; text-decoration:none;">{title}</a>' if url else title
+            desc_html = f'<br/><span style="font-size:11px; color:{COLORS["text_light"]};">{desc}</span>' if desc else ""
+
+            html += f"""
+            <tr>
+              <td style="padding:6px 0; border-bottom:1px solid {COLORS['border']};">
+                {source_badge}
+                <span style="margin-left:4px;">{title_html}</span>
+                {desc_html}
+              </td>
+            </tr>"""
+
+        remaining = total - len(articles)
+        if remaining > 0:
+            html += f"""
+            <tr>
+              <td style="padding:4px 0; font-size:11px; color:{COLORS['text_light']};">
+                ...and {remaining} more
+              </td>
+            </tr>"""
+        return html
+
+    general_html = ""
+    if general:
+        general_html = f"""
+        <div style="margin-bottom:12px;">
+          <strong style="font-size:13px; color:{COLORS['text']};">Top Stories</strong>
+          <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px; margin-top:4px;">
+            {_article_rows(general, general_total)}
+          </table>
+        </div>"""
+
+    tech_html = ""
+    if tech:
+        tech_html = f"""
+        <div>
+          <strong style="font-size:13px; color:{COLORS['text']};">Tech News</strong>
+          <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px; margin-top:4px;">
+            {_article_rows(tech, tech_total)}
+          </table>
+        </div>"""
+
+    return _section_header("News") + f"""
+    <tr><td style="padding:4px 24px 16px 24px;">
+      {general_html}
+      {tech_html}
+    </td></tr>"""
+
+
 def build_email_html(
     tasks_data: dict,
     pipeline_data: dict,
@@ -795,6 +1213,9 @@ def build_email_html(
     networking_data: dict,
     forge_data: dict,
     deadlines: list[dict],
+    calendar_data: Optional[dict] = None,
+    homelab_data: Optional[dict] = None,
+    news_data: Optional[dict] = None,
 ) -> str:
     """Compose the full HTML email."""
     today = date.today()
@@ -802,13 +1223,18 @@ def build_email_html(
     date_display = today.strftime("%B %d, %Y")
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    sections = [
-        _build_deadlines_section(deadlines),
-        _build_tasks_section(tasks_data),
-        _build_pipeline_section(pipeline_data, sheets_pipeline),
-        _build_networking_section(networking_data),
-        _build_forge_section(forge_data),
-    ]
+    sections = []
+    if calendar_data is not None:
+        sections.append(_build_calendar_section(calendar_data))
+    sections.append(_build_deadlines_section(deadlines))
+    sections.append(_build_tasks_section(tasks_data))
+    if homelab_data is not None:
+        sections.append(_build_homelab_section(homelab_data))
+    sections.append(_build_pipeline_section(pipeline_data, sheets_pipeline))
+    sections.append(_build_networking_section(networking_data))
+    sections.append(_build_forge_section(forge_data))
+    if news_data is not None:
+        sections.append(_build_news_section(news_data))
 
     sections_html = "\n".join(sections)
 
@@ -905,14 +1331,11 @@ def send_email(subject: str, html_body: str, to: str, creds=None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def main() -> int:
-    """Run the daily briefing: collect data, build email, send."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        stream=sys.stderr,
-    )
+def run_briefing() -> dict:
+    """Collect all data, build the email, and send it.
 
+    Returns a dict with status and details, suitable for both CLI and MCP use.
+    """
     logger.info("Starting JayBrain Daily Briefing")
 
     # --- Collect data (each section handles its own errors) ---
@@ -933,10 +1356,15 @@ def main() -> int:
         }
         deadlines = []
 
-    # Google credentials (shared across Sheets reads and Gmail send)
+    # Google credentials (shared across Sheets reads, Calendar, and Gmail send)
     google_creds = _get_google_credentials()
     networking_data = collect_networking_tracker(google_creds) if google_creds else {"items": [], "action_needed": [], "error": "No Google credentials"}
     sheets_pipeline = collect_pipeline_tracker(google_creds) if google_creds else []
+
+    # New sections: calendar, homelab, news
+    calendar_data = collect_calendar(google_creds) if google_creds else {"events": [], "count": 0, "error": "No Google credentials"}
+    homelab_data = collect_homelab()
+    news_data = collect_news()
 
     if conn:
         conn.close()
@@ -952,6 +1380,9 @@ def main() -> int:
         networking_data=networking_data,
         forge_data=forge_data,
         deadlines=deadlines,
+        calendar_data=calendar_data,
+        homelab_data=homelab_data,
+        news_data=news_data,
     )
 
     # --- Send via Gmail API ---
@@ -959,9 +1390,39 @@ def main() -> int:
 
     if success:
         logger.info("Daily briefing sent successfully")
+        return {
+            "status": "sent",
+            "recipient": RECIPIENT_EMAIL,
+            "date": today_str,
+            "sections": {
+                "calendar_events": calendar_data.get("count", 0),
+                "deadlines": len(deadlines),
+                "tasks": len(tasks_data.get("tasks", [])),
+                "homelab_entries": len(homelab_data.get("past_entries", [])),
+                "active_apps": len(pipeline_data.get("active_apps", [])),
+                "networking_items": len(networking_data.get("items", [])),
+                "forge_concepts": forge_data.get("total_concepts", 0),
+                "news_general": len(news_data.get("general", [])),
+                "news_tech": len(news_data.get("tech", [])),
+            },
+        }
+    else:
+        return {"status": "failed", "error": "Email send failed. Check logs."}
+
+
+def main() -> int:
+    """Run the daily briefing: collect data, build email, send."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    result = run_briefing()
+    if result.get("status") == "sent":
         return 0
     else:
-        logger.error("Failed to send daily briefing")
+        logger.error("Briefing failed: %s", result.get("error", "unknown"))
         return 1
 
 

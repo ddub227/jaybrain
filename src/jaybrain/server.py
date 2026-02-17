@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -33,6 +36,21 @@ mcp = FastMCP(
         "track tasks, manage knowledge, and maintain session continuity."
     ),
 )
+
+# Dedicated single-thread executor for browser automation.
+# Playwright's sync API cannot run inside an asyncio event loop (which FastMCP
+# uses). By routing all Playwright calls through a dedicated worker thread that
+# has no event loop, the sync API works correctly. A single thread ensures
+# Playwright objects (browser, context, page) stay thread-safe.
+_browser_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pw")
+
+
+async def _run_browser(fn, *args, **kwargs):
+    """Run a sync browser function in the dedicated Playwright thread."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _browser_thread, functools.partial(fn, *args, **kwargs),
+    )
 
 
 # =============================================================================
@@ -1058,6 +1076,24 @@ def context_pack() -> str:
 
 
 @mcp.tool()
+def daily_briefing_send() -> str:
+    """Send the daily briefing email on demand.
+
+    Collects all data (tasks, calendar, homelab, job pipeline, networking,
+    SynapseForge, news) and sends the HTML email via Gmail. Returns status
+    and section counts.
+    """
+    from .daily_briefing import run_briefing
+
+    try:
+        result = run_briefing()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("daily_briefing_send failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
 def memory_reinforce(memory_id: str) -> str:
     """Boost a memory's importance by incrementing its access count.
 
@@ -1432,7 +1468,7 @@ def resume_save_tailored(company: str, role: str, content: str) -> str:
 
 
 # =============================================================================
-# Google Docs Tools (1)
+# Google Docs Tools (1) + Google Drive Folder Tools (2)
 # =============================================================================
 
 @mcp.tool()
@@ -1462,6 +1498,62 @@ def gdoc_create(
         return json.dumps(result)
     except Exception as e:
         logger.error("gdoc_create failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Google Drive Folder Tools (2)
+# =============================================================================
+
+@mcp.tool()
+def gdrive_find_or_create_folder(
+    name: str,
+    parent_id: str = "",
+) -> str:
+    """Find a Google Drive folder by name, or create it if it doesn't exist.
+
+    Searches within the specified parent folder (or root if not specified).
+    Returns the folder ID without creating duplicates if the folder already exists.
+
+    Args:
+        name: Folder name to find or create.
+        parent_id: Optional parent folder ID. If empty, operates in Drive root.
+
+    Returns folder_id, folder_name, and whether it was newly created.
+    """
+    from .gdocs import find_or_create_folder
+
+    try:
+        result = find_or_create_folder(name, parent_id)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("gdrive_find_or_create_folder failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def gdrive_move_to_folder(
+    file_id: str,
+    folder_id: str,
+) -> str:
+    """Move a Google Drive file (doc, sheet, etc.) into a folder.
+
+    Removes the file from its current location and places it in the
+    specified folder. Works with any Drive file type.
+
+    Args:
+        file_id: The Google Drive file ID to move.
+        folder_id: The destination folder ID.
+
+    Returns file_id, file_name, and folder_id on success.
+    """
+    from .gdocs import move_file_to_folder
+
+    try:
+        result = move_file_to_folder(file_id, folder_id)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("gdrive_move_to_folder failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
 
 
@@ -1979,8 +2071,50 @@ def pulse_context(
         return json.dumps({"error": str(e)})
 
 
+# =============================================================================
+# GramCracker (Telegram Bot) Tools (2)
+# =============================================================================
+
 @mcp.tool()
-def browser_launch(
+def telegram_send(message: str) -> str:
+    """Send a message to JJ via Telegram. Works even if GramCracker bot is stopped.
+
+    Splits long messages automatically. Uses Markdown formatting.
+    Requires TELEGRAM_BOT_TOKEN env var.
+    """
+    from .telegram import send_telegram_message
+
+    try:
+        result = send_telegram_message(message)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("telegram_send failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def telegram_status() -> str:
+    """Check if the GramCracker Telegram bot is running.
+
+    Returns uptime, message counts, PID, model info, and last error.
+    Checks if the bot PID is actually alive.
+    """
+    from .telegram import get_bot_status
+
+    try:
+        result = get_bot_status()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("telegram_status failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Browser Automation Tools
+# =============================================================================
+
+@mcp.tool()
+async def browser_launch(
     headless: bool = True,
     url: str = "",
     stealth: bool = False,
@@ -1995,7 +2129,7 @@ def browser_launch(
     from .browser import launch_browser
 
     try:
-        result = launch_browser(headless=headless, url=url, stealth=stealth)
+        result = await _run_browser(launch_browser, headless=headless, url=url, stealth=stealth)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_launch failed: %s", e, exc_info=True)
@@ -2003,7 +2137,7 @@ def browser_launch(
 
 
 @mcp.tool()
-def browser_navigate(url: str) -> str:
+async def browser_navigate(url: str) -> str:
     """Navigate the browser to a URL.
 
     Waits for DOM content to load before returning.
@@ -2011,7 +2145,7 @@ def browser_navigate(url: str) -> str:
     from .browser import navigate
 
     try:
-        result = navigate(url)
+        result = await _run_browser(navigate, url)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_navigate failed: %s", e, exc_info=True)
@@ -2019,7 +2153,7 @@ def browser_navigate(url: str) -> str:
 
 
 @mcp.tool()
-def browser_snapshot() -> str:
+async def browser_snapshot() -> str:
     """Get the page's accessibility tree with numbered element refs.
 
     Returns a text representation of the page structure. Interactive
@@ -2029,7 +2163,7 @@ def browser_snapshot() -> str:
     from .browser import snapshot
 
     try:
-        result = snapshot()
+        result = await _run_browser(snapshot)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_snapshot failed: %s", e, exc_info=True)
@@ -2037,7 +2171,7 @@ def browser_snapshot() -> str:
 
 
 @mcp.tool()
-def browser_screenshot(full_page: bool = False) -> str:
+async def browser_screenshot(full_page: bool = False) -> str:
     """Take a screenshot of the current page.
 
     Returns the file path to the saved PNG image.
@@ -2047,7 +2181,7 @@ def browser_screenshot(full_page: bool = False) -> str:
     from .browser import take_screenshot
 
     try:
-        result = take_screenshot(full_page=full_page)
+        result = await _run_browser(take_screenshot, full_page=full_page)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_screenshot failed: %s", e, exc_info=True)
@@ -2055,7 +2189,7 @@ def browser_screenshot(full_page: bool = False) -> str:
 
 
 @mcp.tool()
-def browser_click(
+async def browser_click(
     ref: int | None = None,
     selector: str | None = None,
 ) -> str:
@@ -2068,7 +2202,7 @@ def browser_click(
     from .browser import click
 
     try:
-        result = click(ref=ref, selector=selector)
+        result = await _run_browser(click, ref=ref, selector=selector)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_click failed: %s", e, exc_info=True)
@@ -2076,7 +2210,7 @@ def browser_click(
 
 
 @mcp.tool()
-def browser_type(
+async def browser_type(
     text: str,
     ref: int | None = None,
     selector: str | None = None,
@@ -2092,7 +2226,7 @@ def browser_type(
     from .browser import type_text
 
     try:
-        result = type_text(text, ref=ref, selector=selector, clear=clear)
+        result = await _run_browser(type_text, text, ref=ref, selector=selector, clear=clear)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_type failed: %s", e, exc_info=True)
@@ -2100,7 +2234,7 @@ def browser_type(
 
 
 @mcp.tool()
-def browser_press_key(key: str) -> str:
+async def browser_press_key(key: str) -> str:
     """Press a keyboard key.
 
     Common keys: Enter, Tab, Escape, Backspace, ArrowDown, ArrowUp,
@@ -2110,7 +2244,7 @@ def browser_press_key(key: str) -> str:
     from .browser import press_key
 
     try:
-        result = press_key(key)
+        result = await _run_browser(press_key, key)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_press_key failed: %s", e, exc_info=True)
@@ -2118,12 +2252,12 @@ def browser_press_key(key: str) -> str:
 
 
 @mcp.tool()
-def browser_close() -> str:
+async def browser_close() -> str:
     """Close the browser and release all resources."""
     from .browser import close_browser
 
     try:
-        result = close_browser()
+        result = await _run_browser(close_browser)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_close failed: %s", e, exc_info=True)
@@ -2135,7 +2269,7 @@ def browser_close() -> str:
 # =============================================================================
 
 @mcp.tool()
-def browser_session_save(name: str) -> str:
+async def browser_session_save(name: str) -> str:
     """Save the current browser session (cookies + localStorage) to a named file.
 
     Use this to persist login state so you can restore it later
@@ -2144,7 +2278,7 @@ def browser_session_save(name: str) -> str:
     from .browser import session_save
 
     try:
-        result = session_save(name)
+        result = await _run_browser(session_save, name)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_session_save failed: %s", e, exc_info=True)
@@ -2152,7 +2286,7 @@ def browser_session_save(name: str) -> str:
 
 
 @mcp.tool()
-def browser_session_load(
+async def browser_session_load(
     name: str,
     headless: bool | None = None,
     url: str = "",
@@ -2168,7 +2302,7 @@ def browser_session_load(
     from .browser import session_load
 
     try:
-        result = session_load(name, headless=headless, url=url, stealth=stealth)
+        result = await _run_browser(session_load, name, headless=headless, url=url, stealth=stealth)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_session_load failed: %s", e, exc_info=True)
@@ -2176,12 +2310,12 @@ def browser_session_load(
 
 
 @mcp.tool()
-def browser_session_list() -> str:
+async def browser_session_list() -> str:
     """List all saved browser sessions with cookie counts and sizes."""
     from .browser import session_list
 
     try:
-        result = session_list()
+        result = await _run_browser(session_list)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_session_list failed: %s", e, exc_info=True)
@@ -2189,7 +2323,7 @@ def browser_session_list() -> str:
 
 
 @mcp.tool()
-def browser_fill_from_bw(
+async def browser_fill_from_bw(
     item_name: str,
     field: str = "password",
     ref: int | None = None,
@@ -2209,7 +2343,7 @@ def browser_fill_from_bw(
     from .browser import fill_from_bw
 
     try:
-        result = fill_from_bw(item_name, field, ref=ref, selector=selector)
+        result = await _run_browser(fill_from_bw, item_name, field, ref=ref, selector=selector)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_fill_from_bw failed: %s", e, exc_info=True)
@@ -2217,7 +2351,7 @@ def browser_fill_from_bw(
 
 
 @mcp.tool()
-def browser_select_option(
+async def browser_select_option(
     ref: int | None = None,
     selector: str | None = None,
     value: str | None = None,
@@ -2232,7 +2366,8 @@ def browser_select_option(
     from .browser import select_option
 
     try:
-        result = select_option(
+        result = await _run_browser(
+            select_option,
             ref=ref, selector=selector,
             value=value, label=label, index=index,
         )
@@ -2243,7 +2378,7 @@ def browser_select_option(
 
 
 @mcp.tool()
-def browser_wait(
+async def browser_wait(
     selector: str | None = None,
     text: str | None = None,
     state: str = "visible",
@@ -2259,7 +2394,8 @@ def browser_wait(
     from .browser import wait_for
 
     try:
-        result = wait_for(
+        result = await _run_browser(
+            wait_for,
             selector=selector, text=text,
             state=state, timeout=timeout,
         )
@@ -2270,7 +2406,7 @@ def browser_wait(
 
 
 @mcp.tool()
-def browser_hover(
+async def browser_hover(
     ref: int | None = None,
     selector: str | None = None,
 ) -> str:
@@ -2282,7 +2418,7 @@ def browser_hover(
     from .browser import hover
 
     try:
-        result = hover(ref=ref, selector=selector)
+        result = await _run_browser(hover, ref=ref, selector=selector)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_hover failed: %s", e, exc_info=True)
@@ -2294,7 +2430,7 @@ def browser_hover(
 # =============================================================================
 
 @mcp.tool()
-def browser_evaluate(expression: str) -> str:
+async def browser_evaluate(expression: str) -> str:
     """Evaluate a JavaScript expression in the page context.
 
     Returns the result as a string. Useful for reading page state,
@@ -2303,7 +2439,7 @@ def browser_evaluate(expression: str) -> str:
     from .browser import evaluate_js
 
     try:
-        result = evaluate_js(expression)
+        result = await _run_browser(evaluate_js, expression)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_evaluate failed: %s", e, exc_info=True)
@@ -2311,12 +2447,12 @@ def browser_evaluate(expression: str) -> str:
 
 
 @mcp.tool()
-def browser_go_back() -> str:
+async def browser_go_back() -> str:
     """Navigate back in browser history (like clicking the back button)."""
     from .browser import go_back
 
     try:
-        result = go_back()
+        result = await _run_browser(go_back)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_go_back failed: %s", e, exc_info=True)
@@ -2324,12 +2460,12 @@ def browser_go_back() -> str:
 
 
 @mcp.tool()
-def browser_go_forward() -> str:
+async def browser_go_forward() -> str:
     """Navigate forward in browser history."""
     from .browser import go_forward
 
     try:
-        result = go_forward()
+        result = await _run_browser(go_forward)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_go_forward failed: %s", e, exc_info=True)
@@ -2337,7 +2473,7 @@ def browser_go_forward() -> str:
 
 
 @mcp.tool()
-def browser_tab_list() -> str:
+async def browser_tab_list() -> str:
     """List all open browser tabs with URLs and titles.
 
     Shows which tab is currently active.
@@ -2345,7 +2481,7 @@ def browser_tab_list() -> str:
     from .browser import tab_list
 
     try:
-        result = tab_list()
+        result = await _run_browser(tab_list)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_tab_list failed: %s", e, exc_info=True)
@@ -2353,7 +2489,7 @@ def browser_tab_list() -> str:
 
 
 @mcp.tool()
-def browser_tab_new(url: str = "") -> str:
+async def browser_tab_new(url: str = "") -> str:
     """Open a new browser tab, optionally navigating to a URL.
 
     The new tab becomes the active tab.
@@ -2361,7 +2497,7 @@ def browser_tab_new(url: str = "") -> str:
     from .browser import tab_new
 
     try:
-        result = tab_new(url=url)
+        result = await _run_browser(tab_new, url=url)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_tab_new failed: %s", e, exc_info=True)
@@ -2369,12 +2505,12 @@ def browser_tab_new(url: str = "") -> str:
 
 
 @mcp.tool()
-def browser_tab_switch(index: int) -> str:
+async def browser_tab_switch(index: int) -> str:
     """Switch to a tab by index (use browser_tab_list to see indexes)."""
     from .browser import tab_switch
 
     try:
-        result = tab_switch(index)
+        result = await _run_browser(tab_switch, index)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_tab_switch failed: %s", e, exc_info=True)
@@ -2382,7 +2518,7 @@ def browser_tab_switch(index: int) -> str:
 
 
 @mcp.tool()
-def browser_tab_close(index: int | None = None) -> str:
+async def browser_tab_close(index: int | None = None) -> str:
     """Close a tab by index, or close the current tab if no index given.
 
     Automatically switches to the last remaining tab after closing.
@@ -2390,7 +2526,7 @@ def browser_tab_close(index: int | None = None) -> str:
     from .browser import tab_close
 
     try:
-        result = tab_close(index=index)
+        result = await _run_browser(tab_close, index=index)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_tab_close failed: %s", e, exc_info=True)
@@ -2402,7 +2538,7 @@ def browser_tab_close(index: int | None = None) -> str:
 # =============================================================================
 
 @mcp.tool()
-def browser_launch_cdp(
+async def browser_launch_cdp(
     port: int = 9222,
     url: str = "",
     headless: bool = False,
@@ -2420,7 +2556,7 @@ def browser_launch_cdp(
     from .browser import launch_with_cdp
 
     try:
-        result = launch_with_cdp(port=port, url=url, headless=headless)
+        result = await _run_browser(launch_with_cdp, port=port, url=url, headless=headless)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_launch_cdp failed: %s", e, exc_info=True)
@@ -2428,7 +2564,7 @@ def browser_launch_cdp(
 
 
 @mcp.tool()
-def browser_connect_cdp(endpoint: str = "") -> str:
+async def browser_connect_cdp(endpoint: str = "") -> str:
     """Reconnect to an already-running Chrome browser via CDP.
 
     Call this after browser_launch_cdp() to reconnect from a new process,
@@ -2440,7 +2576,7 @@ def browser_connect_cdp(endpoint: str = "") -> str:
     from .browser import connect_to_cdp
 
     try:
-        result = connect_to_cdp(endpoint=endpoint)
+        result = await _run_browser(connect_to_cdp, endpoint=endpoint)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_connect_cdp failed: %s", e, exc_info=True)
@@ -2448,7 +2584,7 @@ def browser_connect_cdp(endpoint: str = "") -> str:
 
 
 @mcp.tool()
-def browser_disconnect_cdp() -> str:
+async def browser_disconnect_cdp() -> str:
     """Disconnect from the CDP browser WITHOUT closing it.
 
     The browser keeps running so the user can interact manually.
@@ -2457,7 +2593,7 @@ def browser_disconnect_cdp() -> str:
     from .browser import disconnect_cdp
 
     try:
-        result = disconnect_cdp()
+        result = await _run_browser(disconnect_cdp)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_disconnect_cdp failed: %s", e, exc_info=True)

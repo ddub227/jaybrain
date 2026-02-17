@@ -51,9 +51,11 @@ def now_iso():
 def get_conn():
     if not DB_PATH.parent.exists():
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=5)
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -193,7 +195,19 @@ def main():
         if not raw.strip():
             return
         data = json.loads(raw)
-        handle_event(data)
+
+        # Retry with exponential backoff on database lock errors
+        import time
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                handle_event(data)
+                return
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e) and attempt < max_retries - 1:
+                    time.sleep(0.1 * (2 ** attempt))  # 0.1s, 0.2s, 0.4s
+                    continue
+                raise
     except Exception as e:
         # Hooks must not fail loudly or block Claude Code
         print(f"session_hook: {e}", file=sys.stderr)

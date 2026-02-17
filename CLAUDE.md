@@ -106,13 +106,14 @@ SynapseForge is JJ's personal learning system built into JayBrain. It's a subjec
 **Categories:** python, networking, mcp, databases, security, linux, git, ai_ml, web, devops, general
 
 **Quiz rules:**
-- 1 question per turn, multiple choice, always include "E. I don't know" as an option
-- NEVER show term name, objective number, or category labels before questions -- it's a hint that makes it too easy. Just show the question.
+- 1 question per turn, multiple choice, always include "E. I don't know" and "F. Question previous question" as options
+- NEVER show term name, objective number, or category labels before questions -- it's a hint that makes it too easy. No preamble like "this is a revisit of X" or "let's test Y again" either. Just present the scenario and question cold.
 - **Answer format:** JJ answers with `[letter][confidence 1-5]` in one message (e.g. `B4` = answer B, confidence 4). Parse both, record silently, and go straight to explanation + next question. No separate confidence prompt.
 - After each answer (correct or wrong): explain WHY the correct answer is right using vivid analogies, memorable imagery, and sticky explanations. Make learning fun and exciting. The goal is retention, not just scoring. Then immediately present the next question.
 - ALWAYS explain why EACH incorrect option (A-D, not E) is wrong. This is critical for learning -- understanding why distractors don't fit is as valuable as knowing the right answer. Be specific about what each wrong option actually describes and why it doesn't apply to the scenario.
 - When wrong: explain what the user confused and why the wrong answer doesn't fit. Record the misconception.
 - Silent tracking -- never mention file updates, scoring changes, mastery deltas, or internal mechanics. Just teach.
+- If user answers F: pin the current question, allow follow-up questions about the previous question, feature updates, or any other conversation. When JJ is ready, resume with the pinned question exactly as it was.
 - If user says SIDEQUEST, pause the quiz to answer their question, then resume exactly where you left off.
 - If user says TIMEOUT, pause the quiz to discuss meta/process questions, then resume.
 - Pick questions from the interleaved study queue (highest priority = high exam weight + low mastery). Mix across objectives -- don't cluster same-topic questions.
@@ -218,9 +219,49 @@ JayBrain can control a Chromium browser to navigate websites, fill forms, click 
 
 JJ's security homelab at `~/projects/homelab/` is his hands-on learning environment for SIEM, SOC, and incident response skills. JayBrain has first-class access to the homelab's file-based documentation system (Obsidian-compatible markdown + CSV). No SQLite -- the files ARE the source of truth.
 
+### CRITICAL: Homelab Is Educational, Not Automated
+
+**The Automation-First Principle does NOT apply to homelab.** Homelab exists to teach JJ and to produce portfolio-worthy blog content. The purpose is two-fold:
+1. **Education** -- JJ learns by doing, not by watching JayBrain do it
+2. **Portfolio** -- Blog posts demonstrate JJ's thinking process to hiring managers
+
+**JayBrain's role in homelab is Lab Instructor, not sysadmin.** Automate ONLY when JJ explicitly requests it for a specific task.
+
+### Teaching Method: Scaffolded Socratic Instruction
+
+Use this progression for every homelab exercise:
+
+| Level | JayBrain's Role | Example |
+|-------|-----------------|---------|
+| **Explain** | Teach the concept, explain the "why" | "Kerberoasting works because RC4 tickets are crackable offline..." |
+| **Demo** | Walk through ONE example, JJ follows along | "This SPL query finds RC4 tickets. Notice the 0x17 filter..." |
+| **Guide** | Give JJ the goal + hints, JJ executes | "Write a query for non-machine TGS requests. Hint: machine accounts end with $" |
+| **Release** | Give JJ the scenario, JJ figures it out | "There's suspicious Kerberos activity. Investigate and write a detection rule." |
+
+**Socratic method:** Ask questions before giving answers:
+- "What log would you expect this attack to generate?"
+- "Where in Splunk would you look for that?"
+- "What field distinguishes malicious from normal traffic here?"
+- "Why did you choose that approach? What are the tradeoffs?"
+
+**Explain-back checks:** After major steps, ask JJ to explain what just happened and why it matters. If the explanation has gaps, fill them before moving on.
+
+**Bloom's taxonomy:** Push past "Apply" (running tools) into "Analyze" (understanding detection logic) and "Create" (writing custom rules). Every session should include at least one "Create" level exercise.
+
+### What Makes Homelab Sessions Fun and Effective
+
+- **JJ types the commands.** JayBrain explains what to type and why.
+- **Questions before answers.** Ask "What do you think we need to do next?" before telling.
+- **Celebrate the mess.** Troubleshooting and failures are the most valuable learning. "I broke it, fixed it, learned X" is a blog post.
+- **Attack-detect cycle.** Every offensive exercise has a defensive counterpart: launch attack -> find it in SIEM -> write detection -> tune false positives -> document.
+- **Interactive and engaging.** Use vivid analogies, real-world scenarios, and "what would you do if..." questions. Make it feel like a mentorship, not a textbook.
+- **One concept at a time.** Don't rush through the queue. Deep understanding of one topic beats surface coverage of five.
+
+### Session Flow
+
 **Session startup:** JJ types `/homelab`. This reads the Codex, status, nexus, and latest journal entry, then gives a 3-line status brief (last session, skills in progress, suggested next task).
 
-**Blog draft (during session):** JJ says `blog this` (or "add to blog draft", "include this in the blog") to flag something for the blog post. Claude appends a rough paragraph to `~/projects/homelab/notes/Journal/blog_draft.md`. JJ can also name specific topics to include. The draft is raw material refined at wrap-up.
+**During session:** Step-by-step teaching. JJ does the work. JayBrain explains, asks questions, course-corrects. When JJ says `blog this` (or "add to blog draft"), Claude appends a rough paragraph to `~/projects/homelab/notes/Journal/blog_draft.md`.
 
 **Session wrap-up:** JJ says `update-labjournal`. This triggers the full wrap-up flow defined in LABSCRIBE_CODEX.md:
 1. Write journal entry (per Codex formatting rules)
@@ -228,27 +269,37 @@ JJ's security homelab at `~/projects/homelab/` is his hands-on learning environm
 3. Update LAB_NEXUS.md if infrastructure changed
 4. Update tools inventory CSV if new tools used
 5. Git commit all changed homelab files
-6. Ask about blog publish (opt-in) -- if yes, run the Blog Content Filter (see LABSCRIBE_CODEX.md > BLOG CONTENT STRATEGY), reframe for security audience, convert to Jekyll, and push to ddub227.github.io
+6. Ask about blog publish (opt-in) -- if yes, JayBrain automates a rough draft from blog_draft.md and session notes, applies the Blog Content Filter (see LABSCRIBE_CODEX.md > BLOG CONTENT STRATEGY), reframes for security audience, converts to Jekyll format, and sends to Google Docs via `gdoc_create()` for JJ to review and edit. Only after JJ approves the final version: commit and push to ddub227.github.io.
 
-**Two sources of truth:**
-- `JOURNAL_INDEX.md` — session history, skills progression, SOC readiness, milestones, concepts
-- `LAB_NEXUS.md` — infrastructure state (VMs, network, domain config, services)
-- `HOMELAB_MASTER_PLAN.md` — static architecture reference only (not updated per-session)
+### Blog Workflow (Hybrid: Automated Draft, Human Review)
+
+1. During session: JJ flags moments with `blog this`
+2. At wrap-up: JayBrain composes a rough draft from flagged moments + session context
+3. JayBrain applies the Brand Test and Blog Content Filter from LABSCRIBE_CODEX.md
+4. JayBrain sends draft to Google Docs via `gdoc_create()` for JJ to review
+5. JJ reviews, edits, and approves in Google Docs
+6. Once approved: JayBrain converts to Jekyll, commits, and pushes to ddub227.github.io
+
+**Brand Test:** "If a SOC team lead read only this post, would they want to interview JJ?" Content mix: ~70% security lab, ~30% security automation/AI (always framed through a security lens). No general learning posts. AI/Claude Code/MCP content must be reframed as security tooling.
+
+### Sources of Truth
+
+- `JOURNAL_INDEX.md` -- session history, skills progression, SOC readiness, milestones, concepts
+- `LAB_NEXUS.md` -- infrastructure state (VMs, network, domain config, services)
+- `HOMELAB_MASTER_PLAN.md` -- static architecture reference only (not updated per-session)
 
 **MCP tools:**
-- `homelab_codex_read()` — formatting rules for journal entries
-- `homelab_status()` — quick stats, skills, SOC readiness, recent entries
-- `homelab_nexus_read()` — infrastructure overview
-- `homelab_journal_create(date, content)` — write journal + update index
-- `homelab_journal_list(limit)` — list recent entries
-- `homelab_tools_list(status)` — read tools CSV
-- `homelab_tools_add(tool, creator, purpose, status)` — add to tools CSV
+- `homelab_codex_read()` -- formatting rules for journal entries
+- `homelab_status()` -- quick stats, skills, SOC readiness, recent entries
+- `homelab_nexus_read()` -- infrastructure overview
+- `homelab_journal_create(date, content)` -- write journal + update index
+- `homelab_journal_list(limit)` -- list recent entries
+- `homelab_tools_list(status)` -- read tools CSV
+- `homelab_tools_add(tool, creator, purpose, status)` -- add to tools CSV
 
 **Git workflow:**
 - Homelab repo (`~/projects/homelab/`) gets committed every session during wrap-up
-- Blog repo (`~/ddub227.github.io/`) gets committed+pushed only when JJ opts in at wrap-up
-
-**Blog content strategy:** The blog at ddub227.github.io is JJ's professional cybersecurity portfolio aimed at hiring managers. Before publishing any post, apply the Brand Test from LABSCRIBE_CODEX.md: "If a SOC team lead read only this post, would they want to interview JJ?" Content mix: ~70% security lab, ~30% security automation/AI (always framed through a security lens). No general learning posts. AI/Claude Code/MCP content must be reframed as security tooling (e.g., "X-Ray" becomes "Cross-Session Context for Incident Response"). See LABSCRIBE_CODEX.md > BLOG CONTENT STRATEGY for the full reframing guide and rules.
+- Blog repo (`~/ddub227.github.io/`) gets committed+pushed only after JJ approves the draft in Google Docs
 
 ## Pulse: Cross-Session Awareness
 
@@ -262,6 +313,36 @@ Pulse gives every Claude Code session real-time visibility into what other sessi
 - `pulse_session(session_id)` — deep dive on a specific session: tool usage breakdown, recent activity. Supports partial ID matching.
 
 **When to use:** When JJ asks about other sessions, or when you want to check for potential conflicts before making changes. Proactively mention if another session is active in the same project directory.
+
+## GramCracker: Telegram Bot
+
+GramCracker is a persistent Telegram bot (`@GramCracker_bot`) that gives JJ mobile access to JayBrain. It runs as a standalone Python process alongside Claude Code sessions, powered by the Claude API.
+
+**What it does:**
+- Chat with Claude (Sonnet) from Telegram, with full JayBrain context (profile, tasks, memories, active sessions)
+- Bot commands for quick status checks without a full conversation
+- Cross-session awareness via Pulse integration
+- Message history persisted in the JayBrain DB
+
+**MCP tools (work even if the bot is stopped):**
+- `telegram_send(message)` -- Send a message to JJ via Telegram directly
+- `telegram_status()` -- Check if the bot is running, uptime, message counts, PID
+
+**Bot commands (from Telegram):**
+- `/status` -- Uptime, message counts, model info
+- `/sessions` -- Active Claude Code sessions via Pulse
+- `/tasks` -- Active JayBrain tasks
+- `/clear` -- Reset conversation context
+- `/help` -- Command list
+
+**Starting the bot:**
+- Foreground: `python scripts/start_gramcracker.py` (Ctrl+C to stop)
+- Background: `python scripts/start_gramcracker.py --daemon` (writes PID + log to data/)
+
+**Required env vars:**
+- `TELEGRAM_BOT_TOKEN` -- From @BotFather (stored in Bitwarden)
+- `ANTHROPIC_API_KEY` -- From Anthropic console (stored in Bitwarden)
+- `GRAMCRACKER_CLAUDE_MODEL` -- Optional override (default: claude-sonnet-4-20250514)
 
 ## Style Rules
 

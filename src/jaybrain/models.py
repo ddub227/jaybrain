@@ -512,6 +512,33 @@ class GraphRelationship(BaseModel):
     updated_at: datetime
 
 
+# --- GramCracker (Telegram Bot) Models ---
+
+class TelegramMessageRole(str, Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
+class TelegramMessage(BaseModel):
+    id: int
+    telegram_message_id: Optional[int] = None
+    role: TelegramMessageRole
+    content: str
+    token_count: int = 0
+    created_at: datetime
+
+
+class TelegramBotStatus(BaseModel):
+    running: bool = False
+    pid: Optional[int] = None
+    uptime_seconds: float = 0.0
+    messages_in: int = 0
+    messages_out: int = 0
+    last_message_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+
 class InterviewPrepCreate(BaseModel):
     application_id: str = Field(..., description="Application ID")
     prep_type: InterviewPrepType = Field(default=InterviewPrepType.GENERAL)

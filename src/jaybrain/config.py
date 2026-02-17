@@ -31,16 +31,25 @@ OAUTH_TOKEN_PATH = Path(
     os.path.expanduser("~/.config/gcloud/jaybrain-oauth-token.json")
 )
 GDOC_SHARE_EMAIL = os.environ.get("GDOC_SHARE_EMAIL", "joshuajbudd@gmail.com")
-GDOC_FOLDER_ID = os.environ.get("GDOC_FOLDER_ID", "1WUi1Ty1ghheHQPdQhbieLp5NN2Jt1CJt")
+GDOC_FOLDER_ID = os.environ.get("GDOC_FOLDER_ID", "1_Vk6Vkhf0uihe2vN_-O853p1BYW8rI0v")
+HOMELAB_TOOLS_SHEET_ID = "1VHNuKH4EHXBBECyvwMowD_uRGVWOlsggh35KDjHEIRw"
+SHEETS_INDEX_ID = os.environ.get(
+    "SHEETS_INDEX_ID", "1OCne8ngh2u272n-nwiXWya4VCI6mP3M4iLKIGqzQej8"
+)
 
 # Centralized OAuth scopes -- all Google API access uses this single list.
 # Adding a scope here requires a one-time re-auth (delete the token file).
 OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/calendar.readonly",
 ]
+
+# NewsAPI configuration
+NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
+NEWSAPI_BASE_URL = "https://newsapi.org/v2"
 
 # Scraping constants
 SCRAPE_TIMEOUT = 30  # seconds
@@ -152,6 +161,19 @@ GRAPH_RELATIONSHIP_TYPES = [
 ]
 GRAPH_DEFAULT_DEPTH = 1
 GRAPH_MAX_DEPTH = 3
+
+# --- GramCracker (Telegram bot) ---
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_AUTHORIZED_USER = int(os.environ.get("TELEGRAM_AUTHORIZED_USER", "6017902047"))
+TELEGRAM_POLL_TIMEOUT = 30
+TELEGRAM_API_BASE = "https://api.telegram.org/bot"
+TELEGRAM_MAX_MESSAGE_LEN = 4096
+TELEGRAM_RATE_LIMIT_WINDOW = 60
+TELEGRAM_RATE_LIMIT_MAX = 20
+TELEGRAM_HISTORY_LIMIT = 30
+TELEGRAM_MAX_RESPONSE_TOKENS = 2048
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GRAMCRACKER_CLAUDE_MODEL = os.environ.get("GRAMCRACKER_CLAUDE_MODEL", "claude-sonnet-4-20250514")
 
 # Homelab project paths (file-based, not in SQLite)
 HOMELAB_ROOT = Path(os.path.expanduser("~")) / "projects" / "homelab"

@@ -28,13 +28,16 @@ def _deserialize_f32(data: bytes) -> list[float]:
 def get_connection() -> sqlite3.Connection:
     """Get a database connection with sqlite-vec loaded."""
     ensure_data_dirs()
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
     return conn
 
 
@@ -587,6 +590,31 @@ CREATE INDEX IF NOT EXISTS idx_graph_rel_source ON graph_relationships(source_en
 CREATE INDEX IF NOT EXISTS idx_graph_rel_target ON graph_relationships(target_entity_id);
 CREATE INDEX IF NOT EXISTS idx_graph_rel_type ON graph_relationships(rel_type);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_rel_unique ON graph_relationships(source_entity_id, target_entity_id, rel_type);
+
+-- GramCracker: Telegram messages
+CREATE TABLE IF NOT EXISTS telegram_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_message_id INTEGER,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_messages_role ON telegram_messages(role);
+CREATE INDEX IF NOT EXISTS idx_telegram_messages_created ON telegram_messages(created_at);
+
+-- GramCracker: Bot state (single-row, id=1 enforced)
+CREATE TABLE IF NOT EXISTS telegram_bot_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    pid INTEGER,
+    started_at TEXT,
+    last_heartbeat TEXT,
+    messages_in INTEGER NOT NULL DEFAULT 0,
+    messages_out INTEGER NOT NULL DEFAULT 0,
+    poll_offset INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -1974,3 +2002,78 @@ def reindex_queue(conn: sqlite3.Connection) -> None:
             (i, row["id"]),
         )
     conn.commit()
+
+
+# --- GramCracker (Telegram) CRUD ---
+
+def insert_telegram_message(
+    conn: sqlite3.Connection,
+    role: str,
+    content: str,
+    token_count: int = 0,
+    telegram_message_id: Optional[int] = None,
+) -> int:
+    """Insert a Telegram message. Returns the row ID."""
+    now = now_iso()
+    cursor = conn.execute(
+        """INSERT INTO telegram_messages
+        (telegram_message_id, role, content, token_count, created_at)
+        VALUES (?, ?, ?, ?, ?)""",
+        (telegram_message_id, role, content, token_count, now),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_telegram_history(
+    conn: sqlite3.Connection, limit: int = 30
+) -> list[sqlite3.Row]:
+    """Get recent Telegram messages, oldest first (for Claude context)."""
+    rows = conn.execute(
+        """SELECT * FROM telegram_messages
+        ORDER BY id DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return list(reversed(rows))
+
+
+def get_telegram_message_count(
+    conn: sqlite3.Connection, role: Optional[str] = None
+) -> int:
+    """Count Telegram messages, optionally filtered by role."""
+    if role:
+        return conn.execute(
+            "SELECT COUNT(*) FROM telegram_messages WHERE role = ?",
+            (role,),
+        ).fetchone()[0]
+    return conn.execute("SELECT COUNT(*) FROM telegram_messages").fetchone()[0]
+
+
+def upsert_telegram_bot_state(conn: sqlite3.Connection, **fields) -> None:
+    """Upsert the single-row bot state. Creates row 1 if missing."""
+    conn.execute(
+        """INSERT INTO telegram_bot_state (id) VALUES (1)
+        ON CONFLICT(id) DO NOTHING"""
+    )
+    if fields:
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values())
+        conn.execute(
+            f"UPDATE telegram_bot_state SET {set_clause} WHERE id = 1",
+            values,
+        )
+    conn.commit()
+
+
+def get_telegram_bot_state(conn: sqlite3.Connection) -> Optional[sqlite3.Row]:
+    """Get the current bot state row."""
+    return conn.execute(
+        "SELECT * FROM telegram_bot_state WHERE id = 1"
+    ).fetchone()
+
+
+def clear_telegram_history(conn: sqlite3.Connection) -> int:
+    """Delete all Telegram messages. Returns count deleted."""
+    cursor = conn.execute("DELETE FROM telegram_messages")
+    conn.commit()
+    return cursor.rowcount

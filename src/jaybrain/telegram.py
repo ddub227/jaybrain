@@ -215,8 +215,9 @@ def _build_system_prompt() -> str:
         "Use markdown sparingly (bold, code). No emojis unless JJ uses them first.",
         "",
         "## SynapseForge Quiz Mode",
-        "When JJ asks to study or quiz, use forge_study(subject_id) to get the queue, "
-        "then present questions one at a time.",
+        "NEVER guess or fabricate subject IDs or concept IDs. ONLY use IDs returned by tool calls.",
+        "NEVER invent questions from your training data -- only quiz on concepts returned by forge_study().",
+        "When recording reviews with forge_review(), use the EXACT concept_id from forge_study() results.",
         "",
         "Quiz rules:",
         "- 1 question per message, multiple choice A-D, always include E. I don't know and F. Question previous question",
@@ -224,8 +225,17 @@ def _build_system_prompt() -> str:
         "- All answer options must be UNIFORM in style (all named terms OR all descriptions, never mix)",
         "- All distractors must be plausible and from the same domain -- no obviously irrelevant options",
         "- JJ answers with [letter][confidence 1-5] (e.g. B4). If confidence is missing, ask for it before proceeding",
-        "- After each answer: explain why correct answer is right, why EACH wrong answer is wrong, then next question",
-        "- Use forge_review() to record every answer with outcome, confidence, was_correct, bloom_level",
+        "",
+        "CRITICAL -- When JJ answers a question, you MUST do these steps IN ORDER:",
+        "Step 1: IMMEDIATELY call forge_review() with the concept_id, outcome, confidence, was_correct, and bloom_level. This is NON-NEGOTIABLE. Do this BEFORE writing any text response.",
+        "Step 2: Call forge_study() to get the next concept from the queue.",
+        "Step 3: ONLY AFTER both tool calls, write your response with this EXACT structure:",
+        "  a. Correct/Wrong verdict (one line)",
+        "  b. WHY the correct answer is right (2-3 sentences with analogy or memorable explanation)",
+        "  c. WHY EACH wrong option (A-D) is wrong (1 sentence each, name what it actually describes)",
+        "  d. The next question (built from the concept returned by forge_study in Step 2)",
+        "NEVER skip the explanation sections. NEVER skip forge_review(). If you respond without calling forge_review(), the answer is LOST.",
+        "",
         "- Randomize correct answer position across A-D, never same letter 3x in a row",
         "- Number every question (Q1, Q2, Q3...)",
         "- Silent tracking -- never mention scoring changes or internal mechanics",
@@ -263,6 +273,22 @@ def _build_system_prompt() -> str:
             if decisions:
                 dec_lines = [f"- {r.memory.content[:120]}" for r in decisions]
                 parts.append("## Recent Decisions\n" + "\n".join(dec_lines))
+        except Exception:
+            pass
+
+        # SynapseForge subjects (so bot doesn't have to guess IDs)
+        try:
+            from .forge import get_subjects
+            subjects = get_subjects()
+            if subjects:
+                subj_lines = []
+                for s in subjects:
+                    subj_lines.append(
+                        f"- {s['name']} (id: {s['id']}, concepts: {s.get('concept_count', '?')})"
+                    )
+                parts.append(
+                    "## SynapseForge Subjects (use these EXACT IDs)\n" + "\n".join(subj_lines)
+                )
         except Exception:
             pass
 

@@ -1502,6 +1502,45 @@ def gdoc_create(
 
 
 # =============================================================================
+# Email Tools (1)
+# =============================================================================
+
+@mcp.tool()
+def send_email(
+    to: str = "",
+    subject: str = "",
+    body: str = "",
+) -> str:
+    """Send an email via Gmail API.
+
+    Composes and sends an email. Body accepts markdown which is
+    converted to HTML automatically. Sends from JJ's Gmail.
+
+    Args:
+        to: Recipient email address (defaults to JJ's email).
+        subject: Email subject line.
+        body: Email body in markdown (converted to HTML).
+
+    Returns status and message ID on success.
+    """
+    from .config import GDOC_SHARE_EMAIL
+    from .gdocs import _markdown_to_html
+    from .daily_briefing import send_email as _send_email
+
+    to = to.strip() or GDOC_SHARE_EMAIL
+    html_body = _markdown_to_html(body) if body else f"<p>{subject}</p>"
+
+    try:
+        result = _send_email(subject, html_body, to)
+        if result and isinstance(result, dict):
+            return json.dumps({"status": "sent", "to": to, "message_id": result.get("message_id", "")})
+        return json.dumps({"error": "Failed to send email. Check Google OAuth credentials."})
+    except Exception as e:
+        logger.error("send_email failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Google Drive Folder Tools (2)
 # =============================================================================
 

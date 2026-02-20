@@ -1291,10 +1291,12 @@ def build_email_html(
 # ---------------------------------------------------------------------------
 
 
-def send_email(subject: str, html_body: str, to: str, creds=None) -> bool:
+def send_email(subject: str, html_body: str, to: str, creds=None) -> dict | bool:
     """Send an HTML email via the Gmail API using OAuth credentials.
 
     Uses the same OAuth token as Google Docs/Sheets -- no app password needed.
+    Returns a dict with ``status`` and ``message_id`` on success, or False on
+    failure (for backwards compatibility with callers that check truthiness).
     """
     if creds is None:
         creds = _get_google_credentials()
@@ -1307,20 +1309,24 @@ def send_email(subject: str, html_body: str, to: str, creds=None) -> bool:
 
         service = build("gmail", "v1", credentials=creds, cache_discovery=False)
 
+        # Strip HTML tags for the plain-text fallback
+        plain_text = re.sub(r"<[^>]+>", "", html_body).strip() or subject
+
         message = MIMEMultipart("alternative")
         message["From"] = RECIPIENT_EMAIL
         message["To"] = to
         message["Subject"] = subject
-        message.attach(MIMEText("Daily briefing (view in HTML-capable client)", "plain"))
+        message.attach(MIMEText(plain_text, "plain"))
         message.attach(MIMEText(html_body, "html"))
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
-        service.users().messages().send(
+        result = service.users().messages().send(
             userId="me", body={"raw": raw},
         ).execute()
 
-        logger.info("Email sent successfully to %s via Gmail API", to)
-        return True
+        msg_id = result.get("id", "")
+        logger.info("Email sent successfully to %s via Gmail API (id=%s)", to, msg_id)
+        return {"status": "sent", "message_id": msg_id}
     except Exception as e:
         logger.error("Failed to send email: %s", e, exc_info=True)
         return False

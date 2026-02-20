@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "jaybrain": {
+      "command": "python",
+      "args": ["-m", "jaybrain.server"],
+      "cwd": "C:\\Users\\Joshua\\jaybrain"
+    }
+  }
+}

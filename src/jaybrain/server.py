@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -955,6 +956,102 @@ def forge_errors(
         return json.dumps(analysis)
     except Exception as e:
         logger.error("forge_errors failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# SynapseForge v2 Tools - Extended (3)
+# =============================================================================
+
+@mcp.tool()
+def forge_reembed(
+    subject_id: str = "",
+    dry_run: bool = False,
+) -> str:
+    """Regenerate missing embeddings for forge concepts.
+
+    Finds concepts without vector embeddings and generates them.
+    Pass dry_run=True to see counts without modifying anything.
+    Optionally filter by subject_id.
+    """
+    from .forge import reembed_concepts
+
+    try:
+        result = reembed_concepts(subject_id=subject_id, dry_run=dry_run)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("forge_reembed failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_weak_areas(
+    subject_id: str = "",
+    limit: int = 10,
+) -> str:
+    """Identify weak areas with actionable remediation recommendations.
+
+    Surfaces misconception hotspots, low-mastery concepts, weak objectives,
+    and targeted study recommendations. Use after a study session to focus
+    future review on the highest-impact gaps.
+    """
+    from .forge import get_weak_areas
+
+    try:
+        result = get_weak_areas(subject_id=subject_id, limit=limit)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("forge_weak_areas failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_maintenance(
+    vacuum: bool = True,
+    analyze: bool = True,
+) -> str:
+    """Run database maintenance: integrity check, VACUUM, and ANALYZE.
+
+    - integrity_check: verifies the database is not corrupted
+    - VACUUM: reclaims space from deleted records
+    - ANALYZE: updates query planner statistics for optimal performance
+    Returns results of each operation and current DB size.
+    """
+    from .forge import run_maintenance
+
+    try:
+        result = run_maintenance(vacuum=vacuum, analyze=analyze)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("forge_maintenance failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def forge_backup(local_only: bool = False) -> str:
+    """Run a full SynapseForge backup.
+
+    Exports all forge tables (concepts, reviews, subjects, objectives,
+    streaks, error patterns) to a local JSON file in data/backups/.
+    When local_only=False, also uploads to Google Docs in the
+    'Homelab Backups/SynapseForge Backup <date>' folder.
+    """
+    import subprocess
+    import sys
+
+    try:
+        cmd = [sys.executable, "scripts/backup_forge.py"]
+        if local_only:
+            cmd.append("--local-only")
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+            cwd=str(Path(__file__).parent.parent.parent),
+        )
+        if result.returncode == 0:
+            return json.dumps({"status": "completed", "output": result.stdout[-500:]})
+        return json.dumps({"status": "failed", "error": result.stderr[-500:]})
+    except Exception as e:
+        logger.error("forge_backup failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
 
 

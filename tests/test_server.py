@@ -20,7 +20,7 @@ class TestProfileTools:
         from jaybrain.profile import get_profile
         profile = get_profile()
         assert "name" in profile
-        assert profile["name"] == "Joshua"
+        assert profile["name"] == ""
 
     def test_profile_update(self):
         from jaybrain.profile import update_profile, get_profile

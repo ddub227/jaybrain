@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -26,8 +27,8 @@ from typing import Optional
 # Configuration
 # ---------------------------------------------------------------------------
 
-RECIPIENT_EMAIL = "joshuajbudd@gmail.com"
-NETWORKING_SPREADSHEET_ID = "1BkBxqj3utffObEaQBOjfy4uFMqM0lMHVbT2bP4fhwfI"
+RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "")
+NETWORKING_SPREADSHEET_ID = os.environ.get("NETWORKING_SPREADSHEET_ID", "")
 NETWORKING_SHEET = "Networking"
 PIPELINE_SHEET = "Pipeline"
 
@@ -381,7 +382,7 @@ def collect_homelab() -> dict:
     """Collect homelab journal data: past entries, present stats, future plans."""
     try:
         from .homelab import get_status, list_journal_entries
-        from .config import HOMELAB_JOURNAL_DIR, HOMELAB_JOURNAL_INDEX
+        from .config import HOMELAB_JOURNAL_DIR, HOMELAB_JOURNAL_INDEX, HOMELAB_JOURNAL_FILENAME
 
         # Past: last 3 journal entries
         entries_data = list_journal_entries(limit=3)
@@ -400,7 +401,7 @@ def collect_homelab() -> dict:
             link = latest.get("link", "")
             if link:
                 # Try to read the latest journal file for ## Next Steps
-                for pattern in [f"{link}.md", f"JJ Budd's Learn Out Loud Lab_{latest.get('date', '')}.md"]:
+                for pattern in [f"{link}.md", HOMELAB_JOURNAL_FILENAME.format(date=latest.get('date', ''))]:
                     journal_file = HOMELAB_JOURNAL_DIR / pattern
                     if journal_file.exists():
                         try:

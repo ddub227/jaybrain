@@ -217,7 +217,8 @@ class TestReadiness:
         for c in data["concepts"]:
             record_review(c.id, "understood", confidence=5, was_correct=True)
         readiness = calculate_readiness(data["subject"]["id"])
-        assert readiness["coverage"] == 1.0
+        # Graduated coverage: 1 review per concept -> min(1,3)/3 = 0.333 each
+        assert 0.3 <= readiness["coverage"] <= 0.4
         assert readiness["avg_mastery"] > 0
 
 

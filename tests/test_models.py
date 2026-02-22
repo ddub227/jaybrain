@@ -95,8 +95,8 @@ class TestKnowledgeCreate:
 class TestUserProfile:
     def test_defaults(self):
         p = UserProfile()
-        assert p.name == "Joshua"
-        assert p.nickname == "JJ"
+        assert p.name == ""
+        assert p.nickname == ""
 
 
 class TestSystemStats:

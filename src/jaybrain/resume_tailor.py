@@ -14,6 +14,7 @@ from typing import Optional
 from .config import JOB_SEARCH_DIR, RESUME_TEMPLATE_PATH
 from .db import get_connection, get_job_posting
 from .models import JobPosting
+from .profile import get_profile
 
 logger = logging.getLogger(__name__)
 
@@ -154,9 +155,12 @@ def save_tailored_resume(company: str, role: str, content: str) -> dict:
     resumes_dir = JOB_SEARCH_DIR / "resumes"
     resumes_dir.mkdir(parents=True, exist_ok=True)
 
+    profile = get_profile()
+    profile_name = profile.get("name", "").replace(" ", "") or "User"
+
     safe_company = _safe_filename(company)
     safe_role = _safe_filename(role)
-    filename = f"Resume_JoshuaBudd_{safe_company}_{safe_role}.md"
+    filename = f"Resume_{profile_name}_{safe_company}_{safe_role}.md"
     filepath = resumes_dir / filename
 
     filepath.write_text(content, encoding="utf-8")
@@ -171,7 +175,8 @@ def save_tailored_resume(company: str, role: str, content: str) -> dict:
     # Create Google Doc
     try:
         from .gdocs import create_google_doc
-        doc_title = f"Resume - Joshua Budd - {company} {role}"
+        display_name = profile.get("name", "") or "User"
+        doc_title = f"Resume - {display_name} - {company} {role}"
         gdoc_result = create_google_doc(doc_title, content)
         if "error" in gdoc_result:
             result["gdoc_warning"] = gdoc_result["error"]
@@ -190,9 +195,12 @@ def save_cover_letter(company: str, role: str, content: str) -> dict:
     cover_dir = JOB_SEARCH_DIR / "cover_letters"
     cover_dir.mkdir(parents=True, exist_ok=True)
 
+    profile = get_profile()
+    profile_name = profile.get("name", "").replace(" ", "") or "User"
+
     safe_company = _safe_filename(company)
     safe_role = _safe_filename(role)
-    filename = f"CoverLetter_JoshuaBudd_{safe_company}_{safe_role}.md"
+    filename = f"CoverLetter_{profile_name}_{safe_company}_{safe_role}.md"
     filepath = cover_dir / filename
 
     filepath.write_text(content, encoding="utf-8")
@@ -207,7 +215,8 @@ def save_cover_letter(company: str, role: str, content: str) -> dict:
     # Create Google Doc
     try:
         from .gdocs import create_google_doc
-        doc_title = f"Cover Letter - Joshua Budd - {company} {role}"
+        display_name = profile.get("name", "") or "User"
+        doc_title = f"Cover Letter - {display_name} - {company} {role}"
         gdoc_result = create_google_doc(doc_title, content)
         if "error" in gdoc_result:
             result["gdoc_warning"] = gdoc_result["error"]

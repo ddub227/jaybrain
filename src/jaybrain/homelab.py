@@ -172,7 +172,7 @@ def _update_journal_index(
     month_key = entry_date.strftime("%Y-%m")
     month_header = f"### {month_key}"
 
-    link_target = f"JJ Budd's Learn Out Loud Lab_{date}"
+    link_target = config.HOMELAB_JOURNAL_FILENAME.format(date=date).removesuffix(".md")
     new_row = f"| [[{link_target}|{date}]] | {title} | {focus} |"
 
     if month_header in content:

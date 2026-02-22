@@ -163,8 +163,8 @@ class KnowledgeSearchResult(BaseModel):
 # --- Profile Models ---
 
 class UserProfile(BaseModel):
-    name: str = "Joshua"
-    nickname: str = "JJ"
+    name: str = ""
+    nickname: str = ""
     preferences: dict[str, str] = Field(default_factory=dict)
     projects: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)

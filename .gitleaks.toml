@@ -1,0 +1,11 @@
+# Gitleaks configuration for JayBrain
+# https://github.com/gitleaks/gitleaks
+
+[allowlist]
+  paths = [
+    '''data/''',
+    '''\.env\.example''',
+  ]
+  commits = [
+    "41b02d6ddd1b34ae3ac05fd666c76a34977e92af",
+  ]

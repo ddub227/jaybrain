@@ -35,6 +35,10 @@ def temp_data_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(resume_mod, "RESUME_TEMPLATE_PATH", tmp_path / "job_search" / "resume_template.md")
     monkeypatch.setattr(resume_mod, "JOB_SEARCH_DIR", tmp_path / "job_search")
 
+    # Patch profile module's imported references
+    import jaybrain.profile as profile_mod
+    monkeypatch.setattr(profile_mod, "PROFILE_PATH", data_dir / "profile.yaml")
+
     # Patch sessions module's imported references
     import jaybrain.sessions as sessions_mod
     monkeypatch.setattr(sessions_mod, "SESSIONS_DIR", data_dir / "sessions")

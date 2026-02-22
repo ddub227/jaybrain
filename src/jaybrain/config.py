@@ -30,12 +30,10 @@ OAUTH_CLIENT_PATH = Path(
 OAUTH_TOKEN_PATH = Path(
     os.path.expanduser("~/.config/gcloud/jaybrain-oauth-token.json")
 )
-GDOC_SHARE_EMAIL = os.environ.get("GDOC_SHARE_EMAIL", "joshuajbudd@gmail.com")
-GDOC_FOLDER_ID = os.environ.get("GDOC_FOLDER_ID", "1_Vk6Vkhf0uihe2vN_-O853p1BYW8rI0v")
-HOMELAB_TOOLS_SHEET_ID = "1VHNuKH4EHXBBECyvwMowD_uRGVWOlsggh35KDjHEIRw"
-SHEETS_INDEX_ID = os.environ.get(
-    "SHEETS_INDEX_ID", "1OCne8ngh2u272n-nwiXWya4VCI6mP3M4iLKIGqzQej8"
-)
+GDOC_SHARE_EMAIL = os.environ.get("GDOC_SHARE_EMAIL", "")
+GDOC_FOLDER_ID = os.environ.get("GDOC_FOLDER_ID", "")
+HOMELAB_TOOLS_SHEET_ID = os.environ.get("HOMELAB_TOOLS_SHEET_ID", "")
+SHEETS_INDEX_ID = os.environ.get("SHEETS_INDEX_ID", "")
 
 # Centralized OAuth scopes -- all Google API access uses this single list.
 # Adding a scope here requires a one-time re-auth (delete the token file).
@@ -164,7 +162,7 @@ GRAPH_MAX_DEPTH = 3
 
 # --- GramCracker (Telegram bot) ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_AUTHORIZED_USER = int(os.environ.get("TELEGRAM_AUTHORIZED_USER", "6017902047"))
+TELEGRAM_AUTHORIZED_USER = int(os.environ.get("TELEGRAM_AUTHORIZED_USER", "0"))
 TELEGRAM_POLL_TIMEOUT = 30
 TELEGRAM_API_BASE = "https://api.telegram.org/bot"
 TELEGRAM_MAX_MESSAGE_LEN = 4096
@@ -184,7 +182,9 @@ HOMELAB_CODEX_PATH = HOMELAB_NOTES_DIR / "LABSCRIBE_CODEX.md"
 HOMELAB_NEXUS_PATH = HOMELAB_NOTES_DIR / "LAB_NEXUS.md"
 HOMELAB_TOOLS_CSV = HOMELAB_ROOT / "HOMELAB_TOOLS_INVENTORY.csv"
 HOMELAB_ATTACHMENTS_DIR = HOMELAB_JOURNAL_DIR / "attachments"
-HOMELAB_JOURNAL_FILENAME = "JJ Budd's Learn Out Loud Lab_{date}.md"
+HOMELAB_JOURNAL_FILENAME = os.environ.get(
+    "HOMELAB_JOURNAL_FILENAME", "Learn Out Loud Lab_{date}.md"
+)
 
 
 def ensure_data_dirs() -> None:

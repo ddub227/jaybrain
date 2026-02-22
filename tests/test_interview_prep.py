@@ -118,4 +118,4 @@ class TestGetPrepContext:
 
         ctx = get_prep_context("a1")
         assert "name" in ctx["profile"]
-        assert ctx["profile"]["name"] == "Joshua"
+        assert ctx["profile"]["name"] == ""

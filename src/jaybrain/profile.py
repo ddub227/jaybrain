@@ -13,8 +13,8 @@ from .models import UserProfile
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROFILE = {
-    "name": "Joshua",
-    "nickname": "JJ",
+    "name": "",
+    "nickname": "",
     "preferences": {
         "communication_style": "direct, no fluff",
         "code_style": "clean, no emojis in code",

@@ -23,8 +23,8 @@ class TestGetProfile:
     def test_creates_default_if_missing(self, temp_data_dir, monkeypatch):
         _setup(temp_data_dir, monkeypatch)
         profile = get_profile()
-        assert profile["name"] == "Joshua"
-        assert profile["nickname"] == "JJ"
+        assert profile["name"] == ""
+        assert profile["nickname"] == ""
         assert "communication_style" in profile["preferences"]
 
     def test_reads_existing_profile(self, temp_data_dir, monkeypatch):
@@ -33,7 +33,7 @@ class TestGetProfile:
         get_profile()
         # Read again
         profile = get_profile()
-        assert profile["name"] == "Joshua"
+        assert profile["name"] == ""
 
     def test_default_profile_structure(self, temp_data_dir, monkeypatch):
         _setup(temp_data_dir, monkeypatch)

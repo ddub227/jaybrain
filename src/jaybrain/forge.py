@@ -17,12 +17,18 @@ from typing import Optional
 
 from .config import (
     DEFAULT_SEARCH_LIMIT,
+    FORGE_BLOOM_LEVELS,
+    FORGE_CATEGORIES,
+    FORGE_ERROR_TYPES,
     FORGE_INTERVALS,
     FORGE_MASTERY_DELTAS,
     FORGE_MASTERY_DELTAS_V2,
     FORGE_READINESS_WEIGHTS,
     SEARCH_CANDIDATES,
 )
+
+# Valid outcomes for record_review
+VALID_OUTCOMES = {"understood", "reviewed", "struggled", "skipped"}
 from .db import (
     get_connection,
     get_concepts_for_objective,
@@ -225,6 +231,28 @@ def add_concept(
         conn.close()
 
 
+def _validate_review_inputs(
+    outcome: str, confidence: int, error_type: str, bloom_level: str
+) -> None:
+    """Validate review inputs. Raises ValueError on invalid data."""
+    if outcome not in VALID_OUTCOMES:
+        raise ValueError(
+            f"Invalid outcome '{outcome}'. Must be one of: {', '.join(sorted(VALID_OUTCOMES))}"
+        )
+    if not (1 <= confidence <= 5):
+        raise ValueError(
+            f"Invalid confidence {confidence}. Must be 1-5."
+        )
+    if error_type and error_type not in FORGE_ERROR_TYPES:
+        raise ValueError(
+            f"Invalid error_type '{error_type}'. Must be one of: {', '.join(FORGE_ERROR_TYPES)}"
+        )
+    if bloom_level and bloom_level not in FORGE_BLOOM_LEVELS:
+        raise ValueError(
+            f"Invalid bloom_level '{bloom_level}'. Must be one of: {', '.join(FORGE_BLOOM_LEVELS)}"
+        )
+
+
 def record_review(
     concept_id: str,
     outcome: str,
@@ -239,7 +267,12 @@ def record_review(
 
     v2 mode: when was_correct is provided, uses confidence-weighted 4-quadrant scoring.
     v1 fallback: when was_correct is None, uses outcome-based scoring.
+
+    All writes (review, concept update, streak, error pattern) are wrapped
+    in a single transaction for atomicity.
     """
+    _validate_review_inputs(outcome, confidence, error_type, bloom_level)
+
     conn = get_connection()
     try:
         row = get_forge_concept(conn, concept_id)
@@ -260,10 +293,11 @@ def record_review(
                     row["correct_count"], row["review_count"],
                 )
 
-            # Record error pattern
+            # Record error pattern (deferred commit)
             if error_type and not was_correct:
                 insert_forge_error_pattern(
                     conn, concept_id, error_type, notes, bloom_level,
+                    commit=False,
                 )
         else:
             # v1 fallback
@@ -271,7 +305,7 @@ def record_review(
 
         new_mastery = max(0.0, min(1.0, current_mastery + delta))
 
-        # Insert review record with v2 fields
+        # Insert review record (deferred commit)
         insert_forge_review(
             conn, concept_id, outcome, confidence,
             time_spent_seconds, notes,
@@ -279,6 +313,7 @@ def record_review(
             error_type=error_type,
             bloom_level=bloom_level,
             subject_id=subject_id,
+            commit=False,
         )
 
         # Calculate next review
@@ -287,7 +322,7 @@ def record_review(
         else:
             next_review = _calculate_next_review(new_mastery)
 
-        # Update concept
+        # Update concept (deferred commit)
         update_fields = {
             "mastery_level": new_mastery,
             "review_count": row["review_count"] + 1,
@@ -300,17 +335,24 @@ def record_review(
         elif outcome == "understood":
             update_fields["correct_count"] = row["correct_count"] + 1
 
-        update_forge_concept(conn, concept_id, **update_fields)
+        update_forge_concept(conn, concept_id, commit=False, **update_fields)
 
-        # Update streak
+        # Update streak (deferred commit)
         upsert_forge_streak(
             conn, _today_str(),
             concepts_reviewed=1,
             time_spent_seconds=time_spent_seconds,
+            commit=False,
         )
+
+        # Single atomic commit for all writes
+        conn.commit()
 
         row = get_forge_concept(conn, concept_id)
         return _parse_concept_row(row)
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -797,6 +839,10 @@ def add_objective(
     exam_weight: float = 0.0,
 ) -> dict:
     """Add an exam objective to a subject."""
+    if not (0.0 <= exam_weight <= 1.0):
+        raise ValueError(
+            f"Invalid exam_weight {exam_weight}. Must be between 0.0 and 1.0."
+        )
     objective_id = _generate_id()
     conn = get_connection()
     try:
@@ -855,6 +901,9 @@ def calculate_readiness(subject_id: str) -> dict:
         total_concepts = 0
         reviewed_concepts = 0
         mastery_sum = 0.0
+        weighted_mastery_sum = 0.0
+        weight_total = 0.0
+        coverage_score_sum = 0.0
         now = datetime.now(timezone.utc)
 
         for obj in objectives:
@@ -872,9 +921,16 @@ def calculate_readiness(subject_id: str) -> dict:
                 obj_count += 1
                 if c["review_count"] > 0:
                     reviewed_concepts += 1
+                # Graduated coverage: min(reviews, 3) / 3 gives 0.33 for 1 review,
+                # 0.67 for 2, 1.0 for 3+. Much better than binary yes/no.
+                coverage_score_sum += min(c["review_count"], 3) / 3.0
 
             obj_avg = obj_mastery_sum / obj_count if obj_count > 0 else 0.0
             by_objective[obj["code"]] = round(obj_avg, 4)
+
+            # Weighted mastery: weight each objective's mastery by exam_weight
+            weighted_mastery_sum += obj_avg * obj["exam_weight"]
+            weight_total += obj["exam_weight"]
 
             domain = obj["domain"]
             if domain not in by_domain:
@@ -890,26 +946,39 @@ def calculate_readiness(subject_id: str) -> dict:
                     by_domain[domain] / domain_weights[domain], 4
                 )
 
+        # Use exam-weight-weighted mastery instead of simple average
         avg_mastery = mastery_sum / total_concepts if total_concepts > 0 else 0.0
-        coverage = reviewed_concepts / total_concepts if total_concepts > 0 else 0.0
+        weighted_mastery = weighted_mastery_sum / weight_total if weight_total > 0 else avg_mastery
+
+        # Graduated coverage instead of binary reviewed/not-reviewed
+        coverage = coverage_score_sum / total_concepts if total_concepts > 0 else 0.0
 
         # Get calibration
         cal = _calculate_calibration(conn, subject_id)
         cal_score = cal.calibration_score
 
-        # Recency: fraction of reviewed concepts reviewed in last 7 days
+        # Recency with decay: concepts reviewed recently get full weight,
+        # older reviews decay. Uses 7-day and 30-day windows.
         seven_days_ago = (now - timedelta(days=7)).isoformat()
-        recent_count = conn.execute(
+        thirty_days_ago = (now - timedelta(days=30)).isoformat()
+        recent_7d = conn.execute(
             """SELECT COUNT(DISTINCT concept_id) FROM forge_reviews
             WHERE subject_id = ? AND reviewed_at >= ?""",
             (subject_id, seven_days_ago),
         ).fetchone()[0]
-        recency = recent_count / total_concepts if total_concepts > 0 else 0.0
+        recent_30d = conn.execute(
+            """SELECT COUNT(DISTINCT concept_id) FROM forge_reviews
+            WHERE subject_id = ? AND reviewed_at >= ? AND reviewed_at < ?""",
+            (subject_id, thirty_days_ago, seven_days_ago),
+        ).fetchone()[0]
+        # 7-day reviews get full weight, 30-day reviews get half weight
+        recency_score = (recent_7d + recent_30d * 0.5) / total_concepts if total_concepts > 0 else 0.0
+        recency = min(1.0, recency_score)  # cap at 1.0
 
-        # Weighted overall score
+        # Weighted overall score -- uses exam-weighted mastery
         w = FORGE_READINESS_WEIGHTS
         overall = (
-            w["mastery"] * avg_mastery
+            w["mastery"] * weighted_mastery
             + w["coverage"] * coverage
             + w["calibration"] * cal_score
             + w["recency"] * recency
@@ -1146,3 +1215,255 @@ def get_error_analysis(subject_id: str = "", concept_id: str = "") -> dict:
         }
     finally:
         conn.close()
+
+
+# --- v2: Embedding Regeneration ---
+
+def reembed_concepts(subject_id: str = "", dry_run: bool = False) -> dict:
+    """Regenerate missing or all embeddings for forge concepts.
+
+    Args:
+        subject_id: If provided, only re-embed concepts for this subject.
+        dry_run: If True, just report counts without modifying anything.
+
+    Returns:
+        Dict with counts of processed, skipped, failed concepts.
+    """
+    from .db import _serialize_f32
+
+    conn = get_connection()
+    try:
+        if subject_id:
+            rows = conn.execute(
+                "SELECT id, term, definition FROM forge_concepts WHERE subject_id = ?",
+                (subject_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, term, definition FROM forge_concepts"
+            ).fetchall()
+
+        # Find which concepts are missing embeddings
+        existing_ids = {
+            r["id"] for r in conn.execute(
+                "SELECT id FROM forge_concepts_vec"
+            ).fetchall()
+        }
+
+        missing = [r for r in rows if r["id"] not in existing_ids]
+        has_embedding = [r for r in rows if r["id"] in existing_ids]
+
+        if dry_run:
+            return {
+                "total_concepts": len(rows),
+                "missing_embeddings": len(missing),
+                "has_embeddings": len(has_embedding),
+                "dry_run": True,
+            }
+
+        try:
+            from .search import embed_text
+        except ImportError:
+            return {"error": "Embedding model not available (search module import failed)"}
+
+        processed = 0
+        failed = 0
+        for r in missing:
+            try:
+                embedding = embed_text(f"{r['term']} {r['definition']}")
+                conn.execute(
+                    "INSERT OR REPLACE INTO forge_concepts_vec (id, embedding) VALUES (?, ?)",
+                    (r["id"], _serialize_f32(embedding)),
+                )
+                processed += 1
+            except Exception as e:
+                logger.warning("Failed to embed concept %s: %s", r["id"], e)
+                failed += 1
+
+        if processed > 0:
+            conn.commit()
+
+        return {
+            "total_concepts": len(rows),
+            "missing_before": len(missing),
+            "processed": processed,
+            "failed": failed,
+            "skipped": len(has_embedding),
+        }
+    finally:
+        conn.close()
+
+
+# --- v2: Weak Areas / Error Remediation ---
+
+def get_weak_areas(subject_id: str = "", limit: int = 10) -> dict:
+    """Identify weak areas with actionable remediation recommendations.
+
+    Combines error patterns, low mastery concepts, and misconception analysis
+    to surface targeted study recommendations.
+    """
+    conn = get_connection()
+    try:
+        # Get concepts with misconceptions (most dangerous error type)
+        misconceptions = get_error_patterns(
+            conn, error_type="misconception", subject_id=subject_id, limit=50,
+        )
+
+        # Group by concept
+        concept_errors: dict[str, dict] = {}
+        for e in misconceptions:
+            cid = e["concept_id"]
+            if cid not in concept_errors:
+                row = get_forge_concept(conn, cid)
+                if not row:
+                    continue
+                concept_errors[cid] = {
+                    "concept_id": cid,
+                    "term": row["term"],
+                    "definition": row["definition"],
+                    "mastery_level": row["mastery_level"],
+                    "review_count": row["review_count"],
+                    "correct_count": row["correct_count"],
+                    "misconception_count": 0,
+                    "error_details": [],
+                }
+            concept_errors[cid]["misconception_count"] += 1
+            if e["details"]:
+                concept_errors[cid]["error_details"].append(e["details"])
+
+        # Sort by misconception count (most errors first)
+        misconception_concepts = sorted(
+            concept_errors.values(),
+            key=lambda x: x["misconception_count"],
+            reverse=True,
+        )[:limit]
+
+        # Get lowest mastery concepts (excluding ones already in misconceptions)
+        misconception_ids = {c["concept_id"] for c in misconception_concepts}
+        if subject_id:
+            low_mastery_rows = conn.execute(
+                """SELECT fc.* FROM forge_concepts fc
+                WHERE fc.subject_id = ? AND fc.review_count > 0
+                ORDER BY fc.mastery_level ASC LIMIT ?""",
+                (subject_id, limit),
+            ).fetchall()
+        else:
+            low_mastery_rows = conn.execute(
+                """SELECT * FROM forge_concepts
+                WHERE review_count > 0
+                ORDER BY mastery_level ASC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+
+        low_mastery = []
+        for r in low_mastery_rows:
+            if r["id"] not in misconception_ids:
+                # Check error history
+                errors = get_error_patterns(conn, concept_id=r["id"], limit=5)
+                error_types = [e["error_type"] for e in errors]
+                low_mastery.append({
+                    "concept_id": r["id"],
+                    "term": r["term"],
+                    "mastery_level": r["mastery_level"],
+                    "review_count": r["review_count"],
+                    "correct_count": r["correct_count"],
+                    "error_types": error_types,
+                })
+
+        # Get objective-level weakness if subject provided
+        objective_weakness = []
+        if subject_id:
+            objectives = get_forge_objectives(conn, subject_id)
+            for obj in objectives:
+                concepts = get_concepts_for_objective(conn, obj["id"])
+                if not concepts:
+                    continue
+                avg_m = sum(c["mastery_level"] for c in concepts) / len(concepts)
+                reviewed = sum(1 for c in concepts if c["review_count"] > 0)
+                if avg_m < 0.4 or reviewed < len(concepts) * 0.5:
+                    objective_weakness.append({
+                        "code": obj["code"],
+                        "title": obj["title"],
+                        "domain": obj["domain"],
+                        "avg_mastery": round(avg_m, 4),
+                        "coverage": f"{reviewed}/{len(concepts)}",
+                        "exam_weight": obj["exam_weight"],
+                    })
+            objective_weakness.sort(key=lambda x: x["avg_mastery"])
+
+        # Build recommendations
+        recommendations = []
+        if misconception_concepts:
+            top = misconception_concepts[0]
+            recommendations.append(
+                f"Priority: Fix misconception on '{top['term']}' "
+                f"({top['misconception_count']} errors). "
+                f"Review the definition and practice distinguishing it from similar concepts."
+            )
+        if objective_weakness:
+            top_obj = objective_weakness[0]
+            recommendations.append(
+                f"Weak objective: {top_obj['code']} {top_obj['title']} "
+                f"(mastery: {top_obj['avg_mastery']:.0%}, weight: {top_obj['exam_weight']:.0%}). "
+                f"This domain is high-impact on the exam."
+            )
+        if low_mastery:
+            struggling_count = sum(1 for c in low_mastery if c["mastery_level"] < 0.2)
+            if struggling_count > 0:
+                recommendations.append(
+                    f"{struggling_count} concepts below Spark level need review. "
+                    f"Start with the most-reviewed ones (you've seen them but haven't retained them)."
+                )
+
+        return {
+            "misconception_hotspots": misconception_concepts[:limit],
+            "low_mastery_concepts": low_mastery[:limit],
+            "weak_objectives": objective_weakness[:5],
+            "recommendations": recommendations,
+        }
+    finally:
+        conn.close()
+
+
+# --- Database Maintenance ---
+
+def run_maintenance(vacuum: bool = True, analyze: bool = True) -> dict:
+    """Run database maintenance: integrity check, VACUUM, and ANALYZE.
+
+    Returns dict with results of each operation.
+    """
+    conn = get_connection()
+    results = {}
+    try:
+        # Integrity check
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        results["integrity_check"] = integrity
+
+        # Analyze (update query planner statistics)
+        if analyze:
+            conn.execute("ANALYZE")
+            conn.commit()
+            results["analyze"] = "completed"
+
+        conn.close()
+
+        # VACUUM must run outside a transaction on its own connection
+        if vacuum:
+            import sqlite3 as _sqlite3
+            from .config import DB_PATH
+            vconn = _sqlite3.connect(str(DB_PATH), timeout=30)
+            try:
+                vconn.execute("VACUUM")
+                results["vacuum"] = "completed"
+            finally:
+                vconn.close()
+
+        # Report DB size
+        from .config import DB_PATH
+        results["db_size_bytes"] = DB_PATH.stat().st_size
+
+        return results
+    except Exception as e:
+        logger.error("Maintenance failed: %s", e, exc_info=True)
+        results["error"] = str(e)
+        return results

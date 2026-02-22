@@ -1,4 +1,5 @@
-$action = New-ScheduledTaskAction -Execute 'python' -Argument '-m jaybrain.daily_briefing' -WorkingDirectory 'C:\Users\Joshua\jaybrain'
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$action = New-ScheduledTaskAction -Execute 'python' -Argument '-m jaybrain.daily_briefing' -WorkingDirectory $ProjectRoot
 $trigger = New-ScheduledTaskTrigger -Daily -At 7:00AM
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries
 Register-ScheduledTask -TaskName 'JayBrain Daily Briefing' -Action $action -Trigger $trigger -Settings $settings -Force

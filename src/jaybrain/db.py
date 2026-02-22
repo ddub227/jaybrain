@@ -52,98 +52,138 @@ def init_db() -> None:
         conn.close()
 
 
+def _get_schema_version(conn: sqlite3.Connection) -> int:
+    """Get the current schema version. Returns 0 if no versions applied."""
+    try:
+        row = conn.execute(
+            "SELECT MAX(version) FROM schema_version"
+        ).fetchone()
+        return row[0] or 0
+    except Exception:
+        return 0
+
+
+def _set_schema_version(
+    conn: sqlite3.Connection, version: int, description: str
+) -> None:
+    """Record a migration as applied."""
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version, description, applied_at) VALUES (?, ?, ?)",
+        (version, description, datetime.now(timezone.utc).isoformat()),
+    )
+
+
 def _run_migrations(conn: sqlite3.Connection) -> None:
-    """Apply schema migrations for existing databases."""
-    # Add session_id column to memories if missing
-    columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()
-    }
-    if "session_id" not in columns:
-        conn.execute("ALTER TABLE memories ADD COLUMN session_id TEXT")
-        conn.commit()
+    """Apply schema migrations for existing databases.
 
-    # Backfill orphaned memories: assign session_id by nearest session timestamp
-    orphans = conn.execute(
-        "SELECT id, created_at FROM memories WHERE session_id IS NULL"
-    ).fetchall()
-    if orphans:
-        sessions = conn.execute(
-            "SELECT id, started_at FROM sessions ORDER BY started_at DESC"
+    Each migration is guarded by both a version check and a column-existence
+    check so it is safe to run on databases created before version tracking.
+    """
+    current = _get_schema_version(conn)
+
+    # --- Migration 1: memories.session_id + backfill ---
+    if current < 1:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        if "session_id" not in columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN session_id TEXT")
+
+        orphans = conn.execute(
+            "SELECT id, created_at FROM memories WHERE session_id IS NULL"
         ).fetchall()
-        if sessions:
-            for mem in orphans:
-                # Find the nearest session by timestamp
-                best_sid = sessions[0]["id"]
-                best_diff = float("inf")
-                for s in sessions:
-                    try:
-                        m_dt = datetime.fromisoformat(mem["created_at"])
-                        s_dt = datetime.fromisoformat(s["started_at"])
-                        diff = abs((m_dt - s_dt).total_seconds())
-                        if diff < best_diff:
-                            best_diff = diff
-                            best_sid = s["id"]
-                    except (ValueError, TypeError):
-                        continue
-                conn.execute(
-                    "UPDATE memories SET session_id = ? WHERE id = ?",
-                    (best_sid, mem["id"]),
-                )
-            conn.commit()
+        if orphans:
+            sessions = conn.execute(
+                "SELECT id, started_at FROM sessions ORDER BY started_at DESC"
+            ).fetchall()
+            if sessions:
+                for mem in orphans:
+                    best_sid = sessions[0]["id"]
+                    best_diff = float("inf")
+                    for s in sessions:
+                        try:
+                            m_dt = datetime.fromisoformat(mem["created_at"])
+                            s_dt = datetime.fromisoformat(s["started_at"])
+                            diff = abs((m_dt - s_dt).total_seconds())
+                            if diff < best_diff:
+                                best_diff = diff
+                                best_sid = s["id"]
+                        except (ValueError, TypeError):
+                            continue
+                    conn.execute(
+                        "UPDATE memories SET session_id = ? WHERE id = ?",
+                        (best_sid, mem["id"]),
+                    )
 
-    # v2: Add subject_id and bloom_level to forge_concepts
-    forge_cols = {
-        row[1] for row in conn.execute("PRAGMA table_info(forge_concepts)").fetchall()
-    }
-    if forge_cols:  # table exists
-        if "subject_id" not in forge_cols:
-            conn.execute("ALTER TABLE forge_concepts ADD COLUMN subject_id TEXT DEFAULT ''")
-            conn.commit()
-        if "bloom_level" not in forge_cols:
-            conn.execute("ALTER TABLE forge_concepts ADD COLUMN bloom_level TEXT DEFAULT 'remember'")
-            conn.commit()
-
-    # v2: Add columns to forge_reviews
-    review_cols = {
-        row[1] for row in conn.execute("PRAGMA table_info(forge_reviews)").fetchall()
-    }
-    if review_cols:  # table exists
-        if "was_correct" not in review_cols:
-            conn.execute("ALTER TABLE forge_reviews ADD COLUMN was_correct INTEGER DEFAULT NULL")
-            conn.commit()
-        if "error_type" not in review_cols:
-            conn.execute("ALTER TABLE forge_reviews ADD COLUMN error_type TEXT DEFAULT ''")
-            conn.commit()
-        if "bloom_level" not in review_cols:
-            conn.execute("ALTER TABLE forge_reviews ADD COLUMN bloom_level TEXT DEFAULT ''")
-            conn.commit()
-        if "subject_id" not in review_cols:
-            conn.execute("ALTER TABLE forge_reviews ADD COLUMN subject_id TEXT DEFAULT ''")
-            conn.commit()
-
-    # Add queue_position column to tasks for prioritized task queue
-    task_cols = {
-        row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
-    }
-    if "queue_position" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN queue_position INTEGER DEFAULT NULL")
+        _set_schema_version(conn, 1, "Add memories.session_id and backfill orphans")
         conn.commit()
 
-    # Add checkpoint columns to sessions for context loss prevention
-    session_cols = {
-        row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
-    }
-    if "checkpoint_summary" not in session_cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_summary TEXT NOT NULL DEFAULT ''")
+    # --- Migration 2: forge_concepts v2 columns ---
+    if current < 2:
+        forge_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(forge_concepts)").fetchall()
+        }
+        if forge_cols:
+            if "subject_id" not in forge_cols:
+                conn.execute("ALTER TABLE forge_concepts ADD COLUMN subject_id TEXT DEFAULT ''")
+            if "bloom_level" not in forge_cols:
+                conn.execute("ALTER TABLE forge_concepts ADD COLUMN bloom_level TEXT DEFAULT 'remember'")
+
+        _set_schema_version(conn, 2, "Add forge_concepts subject_id and bloom_level")
         conn.commit()
-    if "checkpoint_decisions" not in session_cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_decisions TEXT NOT NULL DEFAULT '[]'")
+
+    # --- Migration 3: forge_reviews v2 columns ---
+    if current < 3:
+        review_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(forge_reviews)").fetchall()
+        }
+        if review_cols:
+            if "was_correct" not in review_cols:
+                conn.execute("ALTER TABLE forge_reviews ADD COLUMN was_correct INTEGER DEFAULT NULL")
+            if "error_type" not in review_cols:
+                conn.execute("ALTER TABLE forge_reviews ADD COLUMN error_type TEXT DEFAULT ''")
+            if "bloom_level" not in review_cols:
+                conn.execute("ALTER TABLE forge_reviews ADD COLUMN bloom_level TEXT DEFAULT ''")
+            if "subject_id" not in review_cols:
+                conn.execute("ALTER TABLE forge_reviews ADD COLUMN subject_id TEXT DEFAULT ''")
+
+        _set_schema_version(conn, 3, "Add forge_reviews v2 columns")
         conn.commit()
-    if "checkpoint_next_steps" not in session_cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_next_steps TEXT NOT NULL DEFAULT '[]'")
+
+    # --- Migration 4: tasks.queue_position ---
+    if current < 4:
+        task_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "queue_position" not in task_cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN queue_position INTEGER DEFAULT NULL")
+
+        _set_schema_version(conn, 4, "Add tasks.queue_position")
         conn.commit()
-    if "checkpoint_at" not in session_cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_at TEXT")
+
+    # --- Migration 5: session checkpoint columns ---
+    if current < 5:
+        session_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "checkpoint_summary" not in session_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_summary TEXT NOT NULL DEFAULT ''")
+        if "checkpoint_decisions" not in session_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_decisions TEXT NOT NULL DEFAULT '[]'")
+        if "checkpoint_next_steps" not in session_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_next_steps TEXT NOT NULL DEFAULT '[]'")
+        if "checkpoint_at" not in session_cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN checkpoint_at TEXT")
+
+        _set_schema_version(conn, 5, "Add session checkpoint columns")
+        conn.commit()
+
+    # --- Migration 6: forge_concepts subject_id index ---
+    if current < 6:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_forge_concepts_subject_id ON forge_concepts(subject_id)"
+        )
+        _set_schema_version(conn, 6, "Add forge_concepts subject_id index")
         conn.commit()
 
 
@@ -293,6 +333,8 @@ CREATE TABLE IF NOT EXISTS forge_concepts (
     correct_count INTEGER NOT NULL DEFAULT 0,
     last_reviewed TEXT,
     next_review TEXT,
+    subject_id TEXT NOT NULL DEFAULT '',
+    bloom_level TEXT NOT NULL DEFAULT 'remember',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -301,6 +343,7 @@ CREATE INDEX IF NOT EXISTS idx_forge_concepts_category ON forge_concepts(categor
 CREATE INDEX IF NOT EXISTS idx_forge_concepts_mastery ON forge_concepts(mastery_level);
 CREATE INDEX IF NOT EXISTS idx_forge_concepts_next_review ON forge_concepts(next_review);
 CREATE INDEX IF NOT EXISTS idx_forge_concepts_difficulty ON forge_concepts(difficulty);
+CREATE INDEX IF NOT EXISTS idx_forge_concepts_subject_id ON forge_concepts(subject_id);
 
 -- SynapseForge: Concepts FTS5 for keyword search
 CREATE VIRTUAL TABLE IF NOT EXISTS forge_concepts_fts USING fts5(
@@ -345,6 +388,10 @@ CREATE TABLE IF NOT EXISTS forge_reviews (
     time_spent_seconds INTEGER NOT NULL DEFAULT 0,
     notes TEXT NOT NULL DEFAULT '',
     reviewed_at TEXT NOT NULL,
+    was_correct INTEGER DEFAULT NULL,
+    error_type TEXT NOT NULL DEFAULT '',
+    bloom_level TEXT NOT NULL DEFAULT '',
+    subject_id TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (concept_id) REFERENCES forge_concepts(id) ON DELETE CASCADE
 );
 
@@ -614,6 +661,13 @@ CREATE TABLE IF NOT EXISTS telegram_bot_state (
     messages_out INTEGER NOT NULL DEFAULT 0,
     poll_offset INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL DEFAULT ''
+);
+
+-- Schema version tracking
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    description TEXT NOT NULL,
+    applied_at TEXT NOT NULL
 );
 """
 
@@ -1031,7 +1085,9 @@ def insert_forge_concept(
     conn.commit()
 
 
-def update_forge_concept(conn: sqlite3.Connection, concept_id: str, **fields) -> bool:
+def update_forge_concept(
+    conn: sqlite3.Connection, concept_id: str, commit: bool = True, **fields
+) -> bool:
     """Update concept fields. Returns True if found."""
     if not fields:
         return False
@@ -1043,7 +1099,8 @@ def update_forge_concept(conn: sqlite3.Connection, concept_id: str, **fields) ->
     cursor = conn.execute(
         f"UPDATE forge_concepts SET {set_clause} WHERE id = ?", values
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.rowcount > 0
 
 
@@ -1138,6 +1195,7 @@ def insert_forge_review(
     error_type: str = "",
     bloom_level: str = "",
     subject_id: str = "",
+    commit: bool = True,
 ) -> int:
     """Insert a review record. Returns the review ID."""
     now = now_iso()
@@ -1152,7 +1210,8 @@ def insert_forge_review(
         (concept_id, outcome, confidence, time_spent_seconds, notes, now,
          was_correct_int, error_type, bloom_level, subject_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.lastrowid
 
 
@@ -1177,6 +1236,7 @@ def upsert_forge_streak(
     concepts_reviewed: int = 0,
     concepts_added: int = 0,
     time_spent_seconds: int = 0,
+    commit: bool = True,
 ) -> None:
     """Upsert a streak record for a given date."""
     now = now_iso()
@@ -1189,7 +1249,8 @@ def upsert_forge_streak(
             time_spent_seconds = time_spent_seconds + excluded.time_spent_seconds""",
         (date_str, concepts_reviewed, concepts_added, time_spent_seconds, now),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_forge_streak_data(
@@ -1338,6 +1399,7 @@ def insert_forge_error_pattern(
     error_type: str,
     details: str = "",
     bloom_level: str = "",
+    commit: bool = True,
 ) -> int:
     now = now_iso()
     cursor = conn.execute(
@@ -1346,7 +1408,8 @@ def insert_forge_error_pattern(
         VALUES (?, ?, ?, ?, ?)""",
         (concept_id, error_type, details, bloom_level, now),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.lastrowid
 
 

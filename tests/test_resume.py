@@ -45,12 +45,12 @@ class TestResumeTemplate:
 
         template_path = config.JOB_SEARCH_DIR / "resume_template.md"
         template_path.parent.mkdir(parents=True, exist_ok=True)
-        template_path.write_text("# Joshua Budd\n<!-- SUMMARY -->\nSummary here\n<!-- /SUMMARY -->", encoding="utf-8")
+        template_path.write_text("# Test User\n<!-- SUMMARY -->\nSummary here\n<!-- /SUMMARY -->", encoding="utf-8")
         monkeypatch.setattr(resume_mod, "RESUME_TEMPLATE_PATH", template_path)
 
         result = get_template()
         assert result["status"] == "ok"
-        assert "Joshua Budd" in result["content"]
+        assert "Test User" in result["content"]
 
     def test_extract_skills_from_template(self, temp_data_dir, monkeypatch):
         _setup_db(temp_data_dir)
@@ -154,7 +154,7 @@ class TestSaveTailoredDocuments:
         result = save_tailored_resume("Acme Corp", "SOC Analyst", "# Tailored Resume\nContent here")
         assert result["status"] == "saved"
         assert "Acmecorp" in result["filename"] or "AcmeCorp" in result["filename"]
-        assert "Resume_JoshuaBudd_" in result["filename"]
+        assert "Resume_" in result["filename"]
         assert Path(result["path"]).exists()
         content = Path(result["path"]).read_text(encoding="utf-8")
         assert "Tailored Resume" in content
@@ -167,7 +167,7 @@ class TestSaveTailoredDocuments:
 
         result = save_cover_letter("BigTech", "Security Engineer", "Dear Hiring Manager...")
         assert result["status"] == "saved"
-        assert "CoverLetter_JoshuaBudd_" in result["filename"]
+        assert "CoverLetter_" in result["filename"]
         assert result["filename"].endswith(".md")
         assert Path(result["path"]).exists()
 

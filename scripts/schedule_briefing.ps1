@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $TaskName = "JayBrain Daily Briefing"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if (-not $ProjectRoot) { $ProjectRoot = "C:\Users\Joshua\jaybrain" }
+if (-not $ProjectRoot) { $ProjectRoot = Split-Path -Parent $PSScriptRoot }
 
 # Find Python executable
 $PythonPath = (Get-Command python -ErrorAction SilentlyContinue).Source

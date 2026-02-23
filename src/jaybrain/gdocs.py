@@ -514,6 +514,32 @@ def create_google_doc(
 
 
 # ---------------------------------------------------------------------------
+# Read Google Docs
+# ---------------------------------------------------------------------------
+
+
+def read_google_doc(doc_id: str) -> str:
+    """Read a Google Doc and return its content as plain text.
+
+    Uses the Drive API export endpoint to get the document as plain text,
+    which preserves headings, bullets, and table structure well enough
+    for downstream markdown-ish parsing.
+    """
+    creds = _get_credentials()
+    if creds is None:
+        raise RuntimeError("Google credentials not available")
+
+    drive_service = _get_drive_service(creds)
+    content = drive_service.files().export(
+        fileId=doc_id, mimeType="text/plain"
+    ).execute()
+
+    if isinstance(content, bytes):
+        return content.decode("utf-8")
+    return content
+
+
+# ---------------------------------------------------------------------------
 # Google Drive folder management
 # ---------------------------------------------------------------------------
 

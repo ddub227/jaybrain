@@ -189,18 +189,25 @@ def update_goal_progress(goal_id: str, progress: float, note: str = "") -> dict:
 def _parse_domains_doc(text: str) -> list[dict]:
     """Parse the Life Domains Google Doc text into structured domain/goal data.
 
-    Expects markdown-ish format with headers for domains and bullet points
-    for goals.
+    Handles both markdown (# headers, - bullets) and Google Docs plain text
+    export format (bare "Domain N:" headers, numbered sub-goals, * bullets).
     """
     domains = []
     current_domain = None
     current_goal = None
+    in_sub_goals = False
+    # Sections to skip when collecting description text
+    _skip_sections = {
+        "current status:", "decision tree:", "time allocation target:",
+        "key metrics:", "exam domains (sy0-701):", "dependencies:",
+        "subscription tracker:", "key dates:", "vision:",
+    }
 
-    for raw_line in text.split("\n"):
+    for raw_line in text.replace("\r\n", "\n").split("\n"):
         if not raw_line.strip():
             continue
 
-        # Sub-goal: indented bullet (check BEFORE stripping to preserve indent)
+        # Indented bullet -> sub-goal (check BEFORE stripping to detect indent)
         sub_match = re.match(r'^(\s{2,}|\t+)[-*]\s+(.+)', raw_line)
         if sub_match and current_goal and current_domain:
             current_goal["sub_goals"].append(sub_match.group(2).strip())
@@ -208,12 +215,30 @@ def _parse_domains_doc(text: str) -> list[dict]:
 
         line = raw_line.strip()
 
-        # Domain header: # or ## followed by domain name
-        header_match = re.match(r'^#{1,2}\s+(.+)', line)
+        # Skip horizontal rules (Google Docs exports these as underscores)
+        if re.match(r'^[_\-=]{3,}$', line):
+            continue
+
+        # Skip metadata lines
+        if line.startswith(("\ufeff", "Last updated:", "Status:")):
+            continue
+
+        # Domain header: markdown "## Domain..." or plain "Domain N: ..."
+        header_match = (
+            re.match(r'^#{1,2}\s+(?:Domain\s+\d+:\s*)?(.+)', line)
+            or re.match(r'^Domain\s+\d+:\s*(.+)', line)
+        )
         if header_match:
             name = header_match.group(1).strip()
-            # Skip meta-headers
-            if name.lower() in ("life domains", "table of contents", "overview"):
+            # Skip meta-headers and non-domain sections
+            lower = name.lower()
+            if any(skip in lower for skip in (
+                "life domains", "table of contents", "overview",
+                "goal priority stack", "goal conflicts",
+            )):
+                current_domain = None
+                current_goal = None
+                in_sub_goals = False
                 continue
             current_domain = {
                 "name": name,
@@ -222,29 +247,73 @@ def _parse_domains_doc(text: str) -> list[dict]:
             }
             domains.append(current_domain)
             current_goal = None
+            in_sub_goals = False
             continue
 
         if not current_domain:
             continue
 
-        # Goal line: - or * followed by text (top-level, no indent)
-        goal_match = re.match(r'^[-*]\s+(.+)', line)
-        if goal_match:
-            goal_text = goal_match.group(1).strip()
-            # Check for target date in parentheses
+        # "Primary Goal:" line -> create the domain's main goal
+        pg_match = re.match(r'^(?:\*\*)?Primary Goal:?\*?\*?\s*(.+)', line)
+        if pg_match:
+            goal_text = pg_match.group(1).strip()
             date_match = re.search(r'\(by\s+(.+?)\)', goal_text)
             target_date = date_match.group(1) if date_match else None
-
             current_goal = {
                 "title": re.sub(r'\(by\s+.+?\)', '', goal_text).strip(),
                 "target_date": target_date,
                 "sub_goals": [],
             }
             current_domain["goals"].append(current_goal)
+            in_sub_goals = False
             continue
 
-        # Description text for domain
-        if current_domain and not current_domain["goals"]:
+        # "Target Exam Date:" -> capture as target_date on current goal
+        td_match = re.match(r'^(?:\*\*)?Target\s+(?:Exam\s+)?Date:?\*?\*?\s*(.+)', line)
+        if td_match and current_goal:
+            current_goal["target_date"] = td_match.group(1).strip()
+            continue
+
+        # "Sub-goals:" section marker
+        if re.match(r'^(?:\*\*)?Sub-goals?:?\*?\*?\s*$', line, re.IGNORECASE):
+            in_sub_goals = True
+            continue
+
+        # Section headers that end sub-goal collection
+        if line.lower().rstrip(":") + ":" in _skip_sections or re.match(
+            r'^(?:\*\*)?(?:Current Status|Decision Tree|Time Allocation|'
+            r'Key Metrics|Exam Domains|Dependencies|Subscription|Key Dates|Vision)',
+            line, re.IGNORECASE,
+        ):
+            in_sub_goals = False
+            continue
+
+        # Numbered sub-goal: "1. ..." or "1) ..."
+        num_match = re.match(r'^\d+[.)]\s+(.+)', line)
+        if num_match and in_sub_goals and current_goal:
+            current_goal["sub_goals"].append(num_match.group(1).strip())
+            continue
+
+        # Bullet goal/sub-goal: "- text" or "* text"
+        bullet_match = re.match(r'^[-*]\s+(.+)', line)
+        if bullet_match:
+            bullet_text = bullet_match.group(1).strip()
+            if in_sub_goals and current_goal:
+                current_goal["sub_goals"].append(bullet_text)
+            elif not in_sub_goals and current_domain:
+                date_match = re.search(r'\(by\s+(.+?)\)', bullet_text)
+                target_date = date_match.group(1) if date_match else None
+                current_goal = {
+                    "title": re.sub(r'\(by\s+.+?\)', '', bullet_text).strip(),
+                    "target_date": target_date,
+                    "sub_goals": [],
+                }
+                current_domain["goals"].append(current_goal)
+                in_sub_goals = False
+            continue
+
+        # Description text for domain (before any goals are added)
+        if current_domain and not current_domain["goals"] and not in_sub_goals:
             if current_domain["description"]:
                 current_domain["description"] += " " + line
             else:

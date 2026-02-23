@@ -2737,6 +2737,327 @@ async def browser_disconnect_cdp() -> str:
 
 
 # =============================================================================
+# Daemon Tools (2)
+# =============================================================================
+
+@mcp.tool()
+def daemon_status() -> str:
+    """Check the JayBrain daemon status.
+
+    Returns current state (running/stopped), PID, last heartbeat,
+    and registered modules.
+    """
+    from .daemon import get_daemon_status
+
+    try:
+        status = get_daemon_status()
+        return json.dumps(status)
+    except Exception as e:
+        logger.error("daemon_status failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def daemon_control(action: str) -> str:
+    """Control the JayBrain daemon.
+
+    action: 'start' to launch the daemon, 'stop' to shut it down.
+    """
+    from .daemon import daemon_control as _daemon_control
+
+    try:
+        result = _daemon_control(action)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("daemon_control failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Conversation Archive Tools (2)
+# =============================================================================
+
+@mcp.tool()
+def conversation_archive_run() -> str:
+    """Manually trigger a conversation archive run.
+
+    Discovers recent Claude Code conversations, summarizes them via claude -p,
+    and archives to a dated Google Doc. Normally runs nightly at 2 AM via daemon.
+    """
+    from .conversation_archive import run_archive
+
+    try:
+        result = run_archive()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("conversation_archive_run failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def conversation_archive_status() -> str:
+    """Check conversation archive status -- recent runs and stats."""
+    from .conversation_archive import get_archive_status
+
+    try:
+        result = get_archive_status()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("conversation_archive_status failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Life Domains Tools (6)
+# =============================================================================
+
+@mcp.tool()
+def domains_overview() -> str:
+    """Get an overview of all life domains with goals and progress."""
+    from .life_domains import get_domain_overview
+
+    try:
+        result = get_domain_overview()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("domains_overview failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def domains_goal_detail(goal_id: str) -> str:
+    """Get detailed information about a specific goal.
+
+    goal_id: The ID of the goal to inspect.
+    """
+    from .life_domains import get_goal_detail
+
+    try:
+        result = get_goal_detail(goal_id)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("domains_goal_detail failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def domains_update_progress(goal_id: str, progress: float, note: str = "") -> str:
+    """Update progress on a goal.
+
+    goal_id: The goal to update.
+    progress: New progress value (0.0 to 1.0).
+    note: Optional note about the update.
+    """
+    from .life_domains import update_goal_progress
+
+    try:
+        result = update_goal_progress(goal_id, progress, note)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("domains_update_progress failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def domains_sync() -> str:
+    """Manually sync Life Domains from the Google Doc.
+
+    Parses the Life Domains Google Doc and updates the local database.
+    Normally runs weekly via daemon.
+    """
+    from .life_domains import sync_from_gdoc
+
+    try:
+        result = sync_from_gdoc()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("domains_sync failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def domains_conflicts() -> str:
+    """Check for conflicts in goal scheduling and time allocation."""
+    from .life_domains import detect_conflicts
+
+    try:
+        result = detect_conflicts()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("domains_conflicts failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def domains_priority_stack() -> str:
+    """Get the current priority stack -- what to focus on right now.
+
+    Considers deadlines, dependencies, exam dates, and domain weights.
+    """
+    from .life_domains import get_priority_stack
+
+    try:
+        result = get_priority_stack()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("domains_priority_stack failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Heartbeat Tools (2)
+# =============================================================================
+
+@mcp.tool()
+def heartbeat_status() -> str:
+    """Check heartbeat notification status -- recent checks and alerts."""
+    from .heartbeat import get_heartbeat_status
+
+    try:
+        result = get_heartbeat_status()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("heartbeat_status failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def heartbeat_test(check_name: str) -> str:
+    """Manually trigger a specific heartbeat check for testing.
+
+    check_name: One of 'forge_study', 'exam_countdown', 'stale_applications',
+                'session_crash', 'goal_staleness'.
+    """
+    from .heartbeat import run_single_check
+
+    try:
+        result = run_single_check(check_name)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("heartbeat_test failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Onboarding Tools (3)
+# =============================================================================
+
+@mcp.tool()
+def onboarding_start() -> str:
+    """Start the onboarding intake questionnaire for a new user."""
+    from .onboarding import start_onboarding
+
+    try:
+        result = start_onboarding()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("onboarding_start failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def onboarding_answer(step: int, response: str) -> str:
+    """Submit an answer for an onboarding step.
+
+    step: The step number (0-indexed).
+    response: The user's answer text.
+    """
+    from .onboarding import answer_step
+
+    try:
+        result = answer_step(step, response)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("onboarding_answer failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def onboarding_progress() -> str:
+    """Check onboarding progress -- current step and completion status."""
+    from .onboarding import get_progress
+
+    try:
+        result = get_progress()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("onboarding_progress failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Event Discovery Tools (2)
+# =============================================================================
+
+@mcp.tool()
+def event_discover() -> str:
+    """Manually trigger event discovery for local cybersecurity/networking events.
+
+    Searches Eventbrite and other sources for relevant events in the configured
+    location. Normally runs weekly via daemon.
+    """
+    from .event_discovery import run_event_discovery
+
+    try:
+        result = run_event_discovery()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("event_discover failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def event_list(status: str = "new", limit: int = 20) -> str:
+    """List discovered events.
+
+    status: Filter by status ('new', 'interested', 'attending', 'dismissed'). Empty for all.
+    limit: Maximum number to return (default 20).
+    """
+    from .event_discovery import list_events
+
+    try:
+        result = list_events(status=status, limit=limit)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("event_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# Personality Tools (1)
+# =============================================================================
+
+@mcp.tool()
+def personality_config(
+    style: str = "",
+    energy_level: float = -1.0,
+    humor_level: float = -1.0,
+) -> str:
+    """View or update personality settings.
+
+    Call with no arguments to view current config. Provide values to update.
+    style: Personality style preset (e.g. 'default', 'professional', 'casual').
+    energy_level: 0.0-1.0 (0=mellow, 1=high energy). Pass -1 to skip.
+    humor_level: 0.0-1.0 (0=serious, 1=comedic). Pass -1 to skip.
+    """
+    from .personality import get_or_update_config
+
+    try:
+        updates = {}
+        if style:
+            updates["style"] = style
+        if energy_level >= 0:
+            updates["energy_level"] = energy_level
+        if humor_level >= 0:
+            updates["humor_level"] = humor_level
+        result = get_or_update_config(**updates)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("personality_config failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Server entry point
 # =============================================================================
 

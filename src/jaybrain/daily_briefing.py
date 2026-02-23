@@ -1207,6 +1207,57 @@ def _build_news_section(data: dict) -> str:
     </td></tr>"""
 
 
+def _build_domains_section(data: dict) -> str:
+    """Build the Life Domains goals section for the daily briefing."""
+    if not data or not data.get("domains"):
+        return ""
+
+    rows = []
+    for domain in data["domains"][:6]:  # Top 6 domains
+        progress_pct = int(domain.get("progress", 0) * 100)
+        bar_color = COLORS["success"] if progress_pct >= 60 else (
+            COLORS["medium"] if progress_pct >= 30 else COLORS["critical"]
+        )
+        active = domain.get("active_goal_count", 0)
+
+        rows.append(f"""
+          <tr>
+            <td style="padding:8px 12px; border-bottom:1px solid {COLORS['border']};">
+              <strong>{domain['name']}</strong>
+            </td>
+            <td style="padding:8px 12px; border-bottom:1px solid {COLORS['border']}; text-align:center;">
+              {active} goals
+            </td>
+            <td style="padding:8px 12px; border-bottom:1px solid {COLORS['border']}; width:120px;">
+              <div style="background:#eee; border-radius:4px; height:12px; overflow:hidden;">
+                <div style="background:{bar_color}; height:100%; width:{progress_pct}%;"></div>
+              </div>
+              <span style="font-size:11px; color:{COLORS['text_light']};">{progress_pct}%</span>
+            </td>
+          </tr>""")
+
+    if not rows:
+        return ""
+
+    return f"""
+          <tr>
+            <td style="padding:20px 24px;">
+              <h2 style="margin:0 0 12px 0; font-size:18px; color:{COLORS['text']};
+                          border-bottom:2px solid {COLORS['accent']}; padding-bottom:8px;">
+                Life Domains
+              </h2>
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr style="background-color:#f8f9fa;">
+                  <th style="padding:6px 12px; text-align:left; font-size:13px;">Domain</th>
+                  <th style="padding:6px 12px; text-align:center; font-size:13px;">Active</th>
+                  <th style="padding:6px 12px; text-align:left; font-size:13px;">Progress</th>
+                </tr>
+                {"".join(rows)}
+              </table>
+            </td>
+          </tr>"""
+
+
 def build_email_html(
     tasks_data: dict,
     pipeline_data: dict,
@@ -1217,6 +1268,7 @@ def build_email_html(
     calendar_data: Optional[dict] = None,
     homelab_data: Optional[dict] = None,
     news_data: Optional[dict] = None,
+    domains_data: Optional[dict] = None,
 ) -> str:
     """Compose the full HTML email."""
     today = date.today()
@@ -1229,6 +1281,8 @@ def build_email_html(
         sections.append(_build_calendar_section(calendar_data))
     sections.append(_build_deadlines_section(deadlines))
     sections.append(_build_tasks_section(tasks_data))
+    if domains_data is not None:
+        sections.append(_build_domains_section(domains_data))
     if homelab_data is not None:
         sections.append(_build_homelab_section(homelab_data))
     sections.append(_build_pipeline_section(pipeline_data, sheets_pipeline))
@@ -1373,6 +1427,14 @@ def run_briefing() -> dict:
     homelab_data = collect_homelab()
     news_data = collect_news()
 
+    # Life domains goal data
+    domains_data = None
+    try:
+        from .life_domains import get_domain_overview
+        domains_data = get_domain_overview()
+    except Exception as e:
+        logger.debug("Life domains data unavailable: %s", e)
+
     if conn:
         conn.close()
 
@@ -1390,6 +1452,7 @@ def run_briefing() -> dict:
         calendar_data=calendar_data,
         homelab_data=homelab_data,
         news_data=news_data,
+        domains_data=domains_data,
     )
 
     # --- Send via Gmail API ---

@@ -57,4 +57,18 @@ def temp_data_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "HOMELAB_TOOLS_CSV", homelab_root / "HOMELAB_TOOLS_INVENTORY.csv")
     monkeypatch.setattr(config, "HOMELAB_ATTACHMENTS_DIR", homelab_journal / "attachments")
 
+    # Daemon paths (isolated to tmp_path)
+    monkeypatch.setattr(config, "DAEMON_PID_FILE", data_dir / "daemon.pid")
+    monkeypatch.setattr(config, "DAEMON_LOG_FILE", data_dir / "daemon.log")
+
+    # Patch daemon module's imported DB_PATH reference
+    try:
+        import jaybrain.daemon as daemon_mod
+        monkeypatch.setattr(daemon_mod, "DB_PATH", data_dir / "jaybrain.db")
+    except ImportError:
+        pass
+
+    # Conversation archive paths
+    monkeypatch.setattr(config, "CLAUDE_PROJECTS_DIR", tmp_path / "claude_projects")
+
     return data_dir

@@ -186,6 +186,172 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         _set_schema_version(conn, 6, "Add forge_concepts subject_id index")
         conn.commit()
 
+    # --- Migration 7: daemon_state table ---
+    if current < 7:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS daemon_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                pid INTEGER,
+                started_at TEXT,
+                last_heartbeat TEXT,
+                modules TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'stopped'
+            );
+        """)
+        _set_schema_version(conn, 7, "Add daemon_state table")
+        conn.commit()
+
+    # --- Migration 8: conversation archive tables ---
+    if current < 8:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS conversation_archive_runs (
+                id TEXT PRIMARY KEY,
+                run_at TEXT NOT NULL,
+                conversations_found INTEGER DEFAULT 0,
+                conversations_archived INTEGER DEFAULT 0,
+                gdoc_id TEXT DEFAULT '',
+                gdoc_url TEXT DEFAULT '',
+                error TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS conversation_archive_sessions (
+                session_id TEXT PRIMARY KEY,
+                project_dir TEXT DEFAULT '',
+                jsonl_path TEXT DEFAULT '',
+                summary_preview TEXT DEFAULT '',
+                archived_in_run TEXT DEFAULT '',
+                archived_at TEXT NOT NULL
+            );
+        """)
+        _set_schema_version(conn, 8, "Add conversation archive tables")
+        conn.commit()
+
+    # --- Migration 9: life domains tables ---
+    if current < 9:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS life_domains (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                priority INTEGER NOT NULL DEFAULT 0,
+                color TEXT NOT NULL DEFAULT '',
+                hours_per_week REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_life_domains_priority ON life_domains(priority);
+
+            CREATE TABLE IF NOT EXISTS life_goals (
+                id TEXT PRIMARY KEY,
+                domain_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                target_date TEXT,
+                progress REAL NOT NULL DEFAULT 0.0,
+                auto_metric_source TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (domain_id) REFERENCES life_domains(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_life_goals_domain ON life_goals(domain_id);
+            CREATE INDEX IF NOT EXISTS idx_life_goals_status ON life_goals(status);
+
+            CREATE TABLE IF NOT EXISTS life_sub_goals (
+                id TEXT PRIMARY KEY,
+                goal_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                progress REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (goal_id) REFERENCES life_goals(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_life_sub_goals_goal ON life_sub_goals(goal_id);
+
+            CREATE TABLE IF NOT EXISTS life_goal_dependencies (
+                goal_id TEXT NOT NULL,
+                depends_on_goal_id TEXT NOT NULL,
+                PRIMARY KEY (goal_id, depends_on_goal_id),
+                FOREIGN KEY (goal_id) REFERENCES life_goals(id) ON DELETE CASCADE,
+                FOREIGN KEY (depends_on_goal_id) REFERENCES life_goals(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS life_goal_metrics (
+                id TEXT PRIMARY KEY,
+                goal_id TEXT NOT NULL,
+                metric_name TEXT NOT NULL,
+                metric_value REAL NOT NULL DEFAULT 0.0,
+                source TEXT NOT NULL DEFAULT 'manual',
+                recorded_at TEXT NOT NULL,
+                FOREIGN KEY (goal_id) REFERENCES life_goals(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_life_goal_metrics_goal ON life_goal_metrics(goal_id);
+            CREATE INDEX IF NOT EXISTS idx_life_goal_metrics_date ON life_goal_metrics(recorded_at);
+        """)
+        _set_schema_version(conn, 9, "Add life domains tables")
+        conn.commit()
+
+    # --- Migration 10: heartbeat_log table ---
+    if current < 10:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS heartbeat_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                check_name TEXT NOT NULL,
+                triggered INTEGER NOT NULL DEFAULT 0,
+                message TEXT NOT NULL DEFAULT '',
+                notified INTEGER NOT NULL DEFAULT 0,
+                checked_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_heartbeat_log_check ON heartbeat_log(check_name);
+            CREATE INDEX IF NOT EXISTS idx_heartbeat_log_date ON heartbeat_log(checked_at);
+        """)
+        _set_schema_version(conn, 10, "Add heartbeat_log table")
+        conn.commit()
+
+    # --- Migration 11: Phase 4 tables (events, onboarding, personality) ---
+    if current < 11:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS discovered_events (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL DEFAULT '',
+                event_date TEXT,
+                location TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                relevance_score REAL NOT NULL DEFAULT 0.0,
+                tags TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'new',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_date ON discovered_events(event_date);
+            CREATE INDEX IF NOT EXISTS idx_events_status ON discovered_events(status);
+
+            CREATE TABLE IF NOT EXISTS onboarding_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                current_step INTEGER NOT NULL DEFAULT 0,
+                total_steps INTEGER NOT NULL DEFAULT 0,
+                responses TEXT NOT NULL DEFAULT '{}',
+                completed INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT,
+                completed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS personality_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                style TEXT NOT NULL DEFAULT 'default',
+                energy_level REAL NOT NULL DEFAULT 0.7,
+                humor_level REAL NOT NULL DEFAULT 0.5,
+                traits TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            );
+        """)
+        _set_schema_version(conn, 11, "Add events, onboarding, personality tables")
+        conn.commit()
+
 
 SCHEMA_SQL = f"""
 -- Memories table

@@ -187,6 +187,32 @@ HOMELAB_JOURNAL_FILENAME = os.environ.get(
 )
 
 
+# --- Daemon ---
+DAEMON_PID_FILE = DATA_DIR / "daemon.pid"
+DAEMON_LOG_FILE = DATA_DIR / "daemon.log"
+DAEMON_HEARTBEAT_INTERVAL = 60  # seconds between heartbeat writes
+
+# --- Conversation Archive ---
+CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~")) / ".claude" / "projects"
+CONVERSATION_ARCHIVE_HOUR = 2  # 2 AM daily
+CONVERSATION_ARCHIVE_MAX_AGE_DAYS = 7  # only archive conversations from last N days
+
+# --- Life Domains ---
+LIFE_DOMAINS_DOC_ID = os.environ.get(
+    "LIFE_DOMAINS_DOC_ID", "1_doA_YZS1-tqtI8juPG0w3UC56cGk_a-yI1x4OPieJA"
+)
+LIFE_DOMAINS_AVAILABLE_HOURS_WEEK = 40  # hours available outside work/sleep
+
+# --- Heartbeat ---
+HEARTBEAT_FORGE_DUE_THRESHOLD = 5  # notify when this many concepts are due
+HEARTBEAT_APP_STALE_DAYS = 7  # flag apps sitting in "applied" this long
+SECURITY_PLUS_EXAM_DATE = "2026-03-01"
+
+# --- Event Discovery ---
+EVENT_DISCOVERY_LOCATION = "Charlotte, NC"
+EVENTBRITE_API_KEY = os.environ.get("EVENTBRITE_API_KEY", "")
+
+
 def ensure_data_dirs() -> None:
     """Create all required data directories if they don't exist."""
     DATA_DIR.mkdir(exist_ok=True)

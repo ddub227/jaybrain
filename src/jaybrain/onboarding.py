@@ -275,21 +275,86 @@ def _generate_initial_domains(priorities_text: str) -> None:
     conn = get_connection()
     try:
         now = now_iso()
-        # Simple parsing: split on commas or numbered items
         import re
-        items = re.split(r'[,;\n]+|\d+[.)]\s*', priorities_text)
-        items = [item.strip() for item in items if item.strip()]
+
+        items = _parse_priority_items(priorities_text)
 
         for i, item in enumerate(items[:8]):  # Max 8 domains
+            name = _extract_domain_name(item)
             from .life_domains import _generate_id
             conn.execute(
                 """INSERT OR IGNORE INTO life_domains
                 (id, name, description, priority, created_at, updated_at)
-                VALUES (?, ?, 'Generated from onboarding intake', ?, ?, ?)""",
-                (_generate_id(), item, len(items) - i, now, now),
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (_generate_id(), name, item, len(items) - i, now, now),
             )
         conn.commit()
     except Exception as e:
         logger.error("Failed to generate domains: %s", e)
     finally:
         conn.close()
+
+
+def _parse_priority_items(text: str) -> list[str]:
+    """Extract individual priority items from freeform text.
+
+    Handles numbered lists (1) ... 2) ...), comma-separated, newline-separated.
+    """
+    import re
+
+    # Try numbered list first: "1) item. 2) item" or "1. item 2. item"
+    numbered = re.findall(r'\d+[.)]\s*([^.!?]+(?:[.!?](?!\s*\d+[.)]))*)', text)
+    if numbered:
+        return [item.strip().rstrip('.!? ') for item in numbered if item.strip()]
+
+    # Try newline-separated (with optional bullets/dashes)
+    lines = text.strip().split('\n')
+    if len(lines) >= 2:
+        items = []
+        for line in lines:
+            cleaned = re.sub(r'^[-*]\s*', '', line.strip())
+            if cleaned:
+                items.append(cleaned)
+        return items
+
+    # Fall back to comma/semicolon split
+    parts = re.split(r'[,;]+', text)
+    return [p.strip() for p in parts if p.strip() and len(p.strip()) > 2]
+
+
+def _extract_domain_name(description: str) -> str:
+    """Derive a short domain name (2-4 words) from a priority description."""
+    # Common patterns to extract the core noun phrase
+    import re
+
+    core = description
+
+    # Truncate at " -- " to drop elaboration
+    if ' -- ' in core:
+        core = core.split(' -- ')[0]
+
+    # Remove leading verbs like "Pass", "Find", "Get", "Plan", "Build"
+    core = re.sub(
+        r'^(pass|find|get|land|plan|execute|build|achieve|complete|earn|save|move|figure out|work on|focus on)\s+',
+        '', core, flags=re.IGNORECASE,
+    ).strip()
+
+    # Take first 3-4 meaningful words
+    words = core.split()
+    # Skip articles and prepositions at the start
+    skip = {'a', 'an', 'the', 'my', 'for', 'to', 'and', 'or', 'in', 'on', 'up'}
+    meaningful = [w for w in words if w.lower() not in skip]
+
+    if not meaningful:
+        meaningful = words[:3]
+
+    name = ' '.join(meaningful[:4])
+
+    # Capitalize nicely
+    name = name.title()
+
+    # Truncate if still too long
+    if len(name) > 40:
+        name = name[:37] + '...'
+
+    return name

@@ -143,16 +143,55 @@ class DaemonManager:
         DAEMON_PID_FILE.unlink(missing_ok=True)
         logger.info("Daemon stopped.")
 
+    def _cleanup(self) -> None:
+        """Ensure stopped state is written on exit."""
+        if not self._running:
+            return
+        self._running = False
+        try:
+            self._write_status("stopped")
+        except Exception:
+            pass
+        try:
+            DAEMON_PID_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.info("Daemon cleanup complete.")
+
     def start(self) -> None:
         """Start the daemon: write PID, register heartbeat, start scheduler."""
+        import atexit
+
         ensure_data_dirs()
 
         # Write PID file
         DAEMON_PID_FILE.write_text(str(self._pid))
 
+        # Register cleanup via atexit (works on Windows when process exits normally)
+        atexit.register(self._cleanup)
+
         # Register signal handlers
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
         signal.signal(signal.SIGINT, self._handle_shutdown)
+        if sys.platform != "win32":
+            signal.signal(signal.SIGTERM, self._handle_shutdown)
+
+        # On Windows, use SetConsoleCtrlHandler for CTRL_CLOSE/CTRL_SHUTDOWN events
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+
+                @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+                def _win_handler(ctrl_type):
+                    # 0=CTRL_C, 1=CTRL_BREAK, 2=CTRL_CLOSE, 5=CTRL_LOGOFF, 6=CTRL_SHUTDOWN
+                    logger.info("Windows control event %d, shutting down...", ctrl_type)
+                    self._handle_shutdown(ctrl_type, None)
+                    return 1  # Handled
+
+                self._win_handler_ref = _win_handler  # prevent GC
+                kernel32.SetConsoleCtrlHandler(_win_handler, 1)
+            except Exception as e:
+                logger.debug("Could not set Windows ctrl handler: %s", e)
 
         # Register heartbeat job
         self.scheduler.add_job(
@@ -177,15 +216,37 @@ class DaemonManager:
         try:
             self.scheduler.start()
         except (KeyboardInterrupt, SystemExit):
-            pass
+            logger.info("Scheduler stopped by interrupt/exit.")
+        except Exception as e:
+            logger.error("Scheduler crashed: %s", e, exc_info=True)
         finally:
-            self._write_status("stopped")
-            DAEMON_PID_FILE.unlink(missing_ok=True)
-            logger.info("Daemon exited.")
+            self._cleanup()
 
     @property
     def modules(self) -> list[str]:
         return list(self._modules.keys())
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check if a process is still running. Works on Windows Store Python."""
+    if sys.platform == "win32":
+        # os.kill(pid, 0) doesn't work reliably on Windows Store Python
+        # due to app container permissions. Use tasklist instead.
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return str(pid) in result.stdout
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
 
 
 def get_daemon_status() -> dict:
@@ -204,13 +265,7 @@ def get_daemon_status() -> dict:
             }
         # Check if PID is still alive
         pid = row["pid"]
-        alive = False
-        if pid:
-            try:
-                os.kill(pid, 0)
-                alive = True
-            except (OSError, ProcessLookupError):
-                pass
+        alive = _is_pid_alive(pid) if pid else False
 
         status = row["status"] if alive else "stopped"
         return {
@@ -235,8 +290,29 @@ def daemon_control(action: str) -> dict:
         if not pid or not status.get("process_alive"):
             return {"status": "not_running", "message": "Daemon is not running"}
         try:
-            os.kill(pid, signal.SIGTERM)
-            return {"status": "stopping", "message": f"Sent SIGTERM to pid {pid}"}
+            if sys.platform == "win32":
+                # On Windows, SIGTERM doesn't work for background processes.
+                # Use taskkill which triggers atexit/ctrl handlers.
+                import subprocess as _sp
+                _sp.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+            else:
+                os.kill(pid, signal.SIGTERM)
+            # Give it a moment then update DB if process didn't clean up
+            time.sleep(0.5)
+            try:
+                os.kill(pid, 0)
+            except (OSError, ProcessLookupError):
+                # Process is gone -- ensure DB reflects stopped state
+                conn = _get_raw_conn()
+                try:
+                    _ensure_daemon_table(conn)
+                    conn.execute(
+                        "UPDATE daemon_state SET status = 'stopped' WHERE id = 1"
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            return {"status": "stopped", "message": f"Daemon pid {pid} stopped"}
         except (OSError, ProcessLookupError) as e:
             return {"status": "error", "message": str(e)}
 

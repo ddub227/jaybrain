@@ -22,20 +22,59 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Check if a process is running. Works on Windows Store Python."""
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return str(pid) in result.stdout
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+
+
 def run_foreground() -> None:
     """Run the daemon in the foreground."""
+    data_dir = PROJECT_ROOT / "data"
+    log_file = data_dir / "daemon.log"
+
+    # On Windows background mode, stdout/stderr may be invalid handles.
+    # Always log to file; also log to stderr if available.
+    handlers = [logging.FileHandler(str(log_file))]
+    try:
+        sys.stderr.write("")  # Test if stderr is usable
+        handlers.append(logging.StreamHandler(sys.stderr))
+    except (OSError, ValueError, AttributeError):
+        pass
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        stream=sys.stderr,
+        handlers=handlers,
     )
-    from jaybrain.daemon import build_daemon
-    dm = build_daemon()
-    dm.start()
+    try:
+        from jaybrain.daemon import build_daemon
+        dm = build_daemon()
+        dm.start()
+    except Exception:
+        logging.exception("Daemon crashed with unhandled exception")
 
 
 def run_daemon() -> None:
-    """Spawn the daemon as a detached background process."""
+    """Spawn the daemon as a background process.
+
+    On Linux/macOS: uses start_new_session to detach from the terminal.
+    On Windows: uses Task Scheduler for reliable background operation.
+    Fallback: Popen with DETACHED_PROCESS (may not survive console close).
+    """
     data_dir = PROJECT_ROOT / "data"
     data_dir.mkdir(exist_ok=True)
     pid_file = data_dir / "daemon.pid"
@@ -45,18 +84,109 @@ def run_daemon() -> None:
     if pid_file.exists():
         try:
             old_pid = int(pid_file.read_text().strip())
-            os.kill(old_pid, 0)
-            print(f"Daemon already running (pid={old_pid}). Stop it first.")
-            sys.exit(1)
-        except (OSError, ProcessLookupError, ValueError):
+            if _is_pid_alive(old_pid):
+                print(f"Daemon already running (pid={old_pid}). Stop it first.")
+                sys.exit(1)
+            else:
+                pid_file.unlink(missing_ok=True)
+        except (ValueError, FileNotFoundError):
             pid_file.unlink(missing_ok=True)
 
-    # Launch detached process
-    log_fh = open(log_file, "a")
+    if sys.platform == "win32":
+        _run_daemon_windows(pid_file, log_file)
+    else:
+        _run_daemon_posix(pid_file, log_file)
+
+
+def _run_daemon_windows(pid_file: Path, log_file: Path) -> None:
+    """Launch daemon via Windows Task Scheduler for reliable background operation."""
+    script_path = str(Path(__file__).resolve())
+    task_name = "JayBrainDaemon"
+
+    # Create a scheduled task that runs once (immediately) and stays running
+    try:
+        # Delete existing task if any
+        subprocess.run(
+            ["schtasks", "/Delete", "/TN", task_name, "/F"],
+            capture_output=True,
+        )
+        # Create task to run the daemon in foreground mode (task scheduler handles backgrounding)
+        result = subprocess.run(
+            [
+                "schtasks", "/Create",
+                "/TN", task_name,
+                "/TR", f'"{sys.executable}" "{script_path}"',
+                "/SC", "ONCE",
+                "/ST", "00:00",
+                "/F",
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"Failed to create scheduled task: {result.stderr}")
+            print("Falling back to Popen (may not survive console close)...")
+            _run_daemon_popen(pid_file, log_file)
+            return
+
+        # Run it now
+        result = subprocess.run(
+            ["schtasks", "/Run", "/TN", task_name],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"Failed to run scheduled task: {result.stderr}")
+            _run_daemon_popen(pid_file, log_file)
+            return
+
+        # Wait for PID file to appear
+        import time
+        for _ in range(10):
+            time.sleep(1)
+            if pid_file.exists():
+                pid = pid_file.read_text().strip()
+                print(f"JayBrain daemon started via Task Scheduler (pid={pid})")
+                print(f"  Log: {log_file}")
+                print(f"  PID: {pid_file}")
+                print(f"  Stop: python {Path(__file__).name} --stop")
+                return
+
+        print("Daemon started but PID file not found yet. Check the log.")
+        print(f"  Log: {log_file}")
+
+    except FileNotFoundError:
+        print("schtasks not available. Falling back to Popen...")
+        _run_daemon_popen(pid_file, log_file)
+
+
+def _run_daemon_popen(pid_file: Path, log_file: Path) -> None:
+    """Fallback: launch via Popen (unreliable on Windows)."""
+    popen_kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = 0x00000008 | 0x00000200
+    else:
+        popen_kwargs["start_new_session"] = True
     proc = subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve())],
-        stdout=log_fh,
-        stderr=log_fh,
+        **popen_kwargs,
+    )
+    pid_file.write_text(str(proc.pid))
+    print(f"JayBrain daemon started in background (pid={proc.pid})")
+    print(f"  Log: {log_file}")
+    print(f"  PID: {pid_file}")
+    print(f"  Stop: python {Path(__file__).name} --stop")
+
+
+def _run_daemon_posix(pid_file: Path, log_file: Path) -> None:
+    """Launch via Popen with start_new_session (reliable on Linux/macOS)."""
+    proc = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve())],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
     pid_file.write_text(str(proc.pid))
@@ -84,16 +214,23 @@ def stop_daemon() -> None:
         pid_file.unlink(missing_ok=True)
         return
 
-    try:
-        os.kill(pid, 0)  # Check if alive
-    except (OSError, ProcessLookupError):
+    if not _is_pid_alive(pid):
         print(f"Daemon process {pid} is not running. Cleaning up PID file.")
         pid_file.unlink(missing_ok=True)
         return
 
     try:
-        os.kill(pid, signal.SIGTERM)
-        print(f"Sent SIGTERM to daemon (pid={pid}).")
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+            # Also clean up the scheduled task if it exists
+            subprocess.run(
+                ["schtasks", "/Delete", "/TN", "JayBrainDaemon", "/F"],
+                capture_output=True,
+            )
+        else:
+            os.kill(pid, signal.SIGTERM)
+        print(f"Stopped daemon (pid={pid}).")
+        pid_file.unlink(missing_ok=True)
     except (OSError, ProcessLookupError) as e:
         print(f"Failed to stop daemon: {e}")
 

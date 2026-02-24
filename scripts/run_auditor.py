@@ -51,7 +51,11 @@ def main() -> None:
     prompt = (
         "Read every .py file in ../src/jaybrain/ and ../pyproject.toml. "
         "Produce the full structured audit report as described in your CLAUDE.md. "
-        "Start by listing all .py files, then read and audit each one systematically. "
+        "Start by listing all .py files, then read and audit each one. "
+        "Prioritize the highest-risk files first: "
+        "server.py, db.py, config.py, browser.py, trash.py, scraping.py, "
+        "telegram.py, daemon.py, sessions.py -- then cover the rest. "
+        "Read files in bulk (multiple reads per turn) to maximize coverage. "
         "Output the complete report as your response text."
     )
 
@@ -71,7 +75,7 @@ def main() -> None:
                 "claude",
                 "--print",
                 "--dangerously-skip-permissions",
-                "--max-turns", "50",
+                "--max-turns", "100",
                 "--disallowedTools", "Edit,Write,NotebookEdit",
                 prompt,
             ],

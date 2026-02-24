@@ -4,12 +4,20 @@
 Usage:
     python scripts/run_auditor.py [--output FILE]
 
-Runs a Claude Code session from the auditor/ directory, which has its own
-CLAUDE.md with adversarial instructions and ZERO JayBrain context. The
-session is strictly read-only -- it can only use Read, Glob, Grep, and
-Bash tools. Edit/Write are explicitly blocked.
+Isolation strategy:
+    Claude Code resolves CLAUDE.md from the git root, not the CWD. If we ran
+    inside the jaybrain repo, the auditor would inherit the root CLAUDE.md
+    (full JayBrain context), defeating its purpose.
 
-The auditor's report is captured from stdout and saved to a file.
+    Fix: this script copies auditor/CLAUDE.md to a directory OUTSIDE the repo
+    (~/jaybrain-auditor/) and launches Claude Code from there. No .git parent
+    means Claude Code only sees the auditor's CLAUDE.md.
+
+    Absolute paths in the CLAUDE.md and prompt ensure the auditor can still
+    read the jaybrain source code.
+
+The session is strictly read-only -- Edit/Write/NotebookEdit are blocked via
+--disallowedTools.
 """
 
 import argparse
@@ -20,9 +28,23 @@ from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CODEBASE_DIR = PROJECT_ROOT / "src" / "jaybrain"
+PYPROJECT = PROJECT_ROOT / "pyproject.toml"
+
+# Template lives in-repo for version control; deployed outside repo for isolation
+AUDITOR_TEMPLATE = PROJECT_ROOT / "auditor" / "CLAUDE.md"
+
+# Isolation directory -- MUST be outside any git repo
+AUDITOR_RUNTIME_DIR = Path.home() / "jaybrain-auditor"
 
 # Claude CLI installed via npm -- find it reliably across terminals
 NPM_GLOBAL_BIN = Path.home() / "AppData" / "Roaming" / "npm"
+
+DEFAULT_OUTPUT = (
+    PROJECT_ROOT
+    / "data"
+    / f"audit_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+)
 
 
 def _find_claude() -> str:
@@ -36,13 +58,40 @@ def _find_claude() -> str:
         if candidate.exists():
             return str(candidate)
     return "claude"  # last resort, let subprocess raise FileNotFoundError
-AUDITOR_DIR = PROJECT_ROOT / "auditor"
-AUDITOR_MD = AUDITOR_DIR / "CLAUDE.md"
-DEFAULT_OUTPUT = (
-    PROJECT_ROOT
-    / "data"
-    / f"audit_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-)
+
+
+def _deploy_claude_md() -> Path:
+    """Copy the auditor CLAUDE.md template outside the repo, rewriting paths.
+
+    Replaces relative paths (../src/jaybrain/, ../pyproject.toml) with
+    absolute paths so the auditor can read the codebase from its isolated
+    runtime directory.
+    """
+    AUDITOR_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+    template = AUDITOR_TEMPLATE.read_text(encoding="utf-8")
+
+    # Replace relative paths with absolute paths (use forward slashes for
+    # consistency -- Claude Code on Windows handles both)
+    codebase_abs = CODEBASE_DIR.as_posix()
+    pyproject_abs = PYPROJECT.as_posix()
+
+    deployed = template.replace("../src/jaybrain/", f"{codebase_abs}/")
+    deployed = deployed.replace("../pyproject.toml", pyproject_abs)
+
+    target = AUDITOR_RUNTIME_DIR / "CLAUDE.md"
+    target.write_text(deployed, encoding="utf-8")
+    return target
+
+
+def _verify_isolation() -> bool:
+    """Verify the runtime directory is NOT inside a git repo."""
+    check_dir = AUDITOR_RUNTIME_DIR
+    while check_dir != check_dir.parent:
+        if (check_dir / ".git").exists():
+            return False
+        check_dir = check_dir.parent
+    return True
 
 
 def main() -> None:
@@ -57,16 +106,34 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if not AUDITOR_MD.exists():
-        print(f"Error: {AUDITOR_MD} not found.")
-        print(f"Expected at: {AUDITOR_DIR}")
+    # --- Pre-flight checks ---
+
+    if not AUDITOR_TEMPLATE.exists():
+        print(f"Error: auditor template not found at {AUDITOR_TEMPLATE}")
+        sys.exit(1)
+
+    if not CODEBASE_DIR.exists():
+        print(f"Error: codebase not found at {CODEBASE_DIR}")
+        sys.exit(1)
+
+    # Deploy CLAUDE.md to isolated runtime directory
+    deployed_md = _deploy_claude_md()
+
+    if not _verify_isolation():
+        print(f"FATAL: {AUDITOR_RUNTIME_DIR} is inside a git repo!")
+        print("The auditor runtime directory must be outside all git repos.")
+        print("Move or delete the .git directory, or change AUDITOR_RUNTIME_DIR.")
         sys.exit(1)
 
     # Ensure output directory exists
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
+    # Use absolute paths in the prompt so the auditor can find the code
+    codebase_abs = CODEBASE_DIR.as_posix()
+    pyproject_abs = PYPROJECT.as_posix()
+
     prompt = (
-        "Read every .py file in ../src/jaybrain/ and ../pyproject.toml. "
+        f"Read every .py file in {codebase_abs}/ and {pyproject_abs}. "
         "Produce the full structured audit report as described in your CLAUDE.md. "
         "Start by listing all .py files, then read and audit each one. "
         "Prioritize the highest-risk files first: "
@@ -77,16 +144,16 @@ def main() -> None:
     )
 
     print("Launching adversarial security auditor...")
-    print(f"  Instructions: {AUDITOR_MD}")
-    print(f"  Codebase:     {PROJECT_ROOT / 'src' / 'jaybrain'}")
-    print(f"  Output:        {args.output}")
-    print(f"  Mode:          READ-ONLY (Edit/Write blocked)")
+    print(f"  Template:  {AUDITOR_TEMPLATE}")
+    print(f"  Deployed:  {deployed_md}")
+    print(f"  Runtime:   {AUDITOR_RUNTIME_DIR} (outside git repo)")
+    print(f"  Codebase:  {CODEBASE_DIR}")
+    print(f"  Output:    {args.output}")
+    print(f"  Mode:      READ-ONLY (Edit/Write blocked)")
+    print(f"  Isolation: VERIFIED (no .git in parent chain)")
     print()
 
     try:
-        # Run from auditor/ so it picks up auditor/CLAUDE.md, NOT the root CLAUDE.md.
-        # --print: non-interactive, report goes to stdout.
-        # --disallowedTools: block all write tools as a hard safety layer.
         claude_bin = _find_claude()
         result = subprocess.run(
             [
@@ -97,7 +164,7 @@ def main() -> None:
                 "--disallowedTools", "Edit,Write,NotebookEdit",
                 prompt,
             ],
-            cwd=str(AUDITOR_DIR),
+            cwd=str(AUDITOR_RUNTIME_DIR),
             capture_output=True,
             text=True,
         )

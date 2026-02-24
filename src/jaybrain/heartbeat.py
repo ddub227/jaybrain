@@ -30,6 +30,7 @@ RATE_LIMIT_HOURS = {
     "session_crash": 2,
     "goal_staleness": 160,  # ~weekly
     "time_allocation": 160,  # ~weekly
+    "network_decay": 160,  # ~weekly
 }
 
 
@@ -366,6 +367,12 @@ def _check_time_allocation_wrapper() -> dict:
     return check_time_allocation()
 
 
+def _check_network_decay_wrapper() -> dict:
+    """Wrapper to call network_decay.check_network_decay()."""
+    from .network_decay import check_network_decay
+    return check_network_decay()
+
+
 def run_single_check(check_name: str) -> dict:
     """Run a single heartbeat check by name."""
     checks = {
@@ -377,6 +384,7 @@ def run_single_check(check_name: str) -> dict:
         "session_crash": check_session_crash,
         "goal_staleness": check_goal_staleness,
         "time_allocation": _check_time_allocation_wrapper,
+        "network_decay": _check_network_decay_wrapper,
     }
 
     func = checks.get(check_name)

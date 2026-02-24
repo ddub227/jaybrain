@@ -28,6 +28,8 @@ from .config import (
     DAILY_BRIEFING_HOUR,
     DAILY_BRIEFING_MINUTE,
     DB_PATH,
+    NETWORK_DECAY_NUDGE_DAY,
+    NETWORK_DECAY_NUDGE_HOUR,
     ensure_data_dirs,
 )
 
@@ -450,6 +452,22 @@ def build_daemon() -> DaemonManager:
         )
     except ImportError:
         logger.debug("time_allocation module not available, skipping")
+
+    # Phase 3c: Network decay midweek check
+    try:
+        from .network_decay import check_network_decay
+        dm.register_module(
+            "network_decay",
+            check_network_decay,
+            CronTrigger(
+                day_of_week=NETWORK_DECAY_NUDGE_DAY,
+                hour=NETWORK_DECAY_NUDGE_HOUR,
+                minute=0,
+            ),
+            "Midweek network relationship check",
+        )
+    except ImportError:
+        logger.debug("network_decay module not available, skipping")
 
     # Phase 4: Event discovery (Monday 8 AM)
     try:

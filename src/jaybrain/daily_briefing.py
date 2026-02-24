@@ -1512,6 +1512,7 @@ def format_telegram_briefing(
     homelab_data: Optional[dict] = None,
     domains_data: Optional[dict] = None,
     time_data: Optional[dict] = None,
+    network_data: Optional[dict] = None,
 ) -> str:
     """Format collected data as a plain-text Telegram message.
 
@@ -1609,6 +1610,18 @@ def format_telegram_briefing(
         if lines:
             parts.append(_fmt_section("LIFE DOMAINS", lines))
 
+    # Network decay
+    if network_data and network_data.get("stale_count", 0) > 0:
+        stale = [c for c in network_data.get("contacts", []) if c.get("overdue_by", 0) > 0]
+        if stale:
+            lines = []
+            for c in stale[:5]:
+                company_str = f" ({c['company']})" if c.get("company") else ""
+                lines.append(f"{c['name']}{company_str} -- {c['overdue_by']}d overdue")
+            if len(stale) > 5:
+                lines.append(f"...and {len(stale) - 5} more")
+            parts.append(_fmt_section(f"NETWORK ({len(stale)} stale)", lines))
+
     # Job pipeline
     pipeline = pipeline_data.get("pipeline", {})
     active_apps = pipeline_data.get("active_apps", [])
@@ -1686,6 +1699,13 @@ def run_telegram_briefing() -> dict:
     except Exception as e:
         logger.debug("Life domains data unavailable: %s", e)
 
+    network_data = None
+    try:
+        from .network_decay import get_network_health
+        network_data = get_network_health()
+    except Exception as e:
+        logger.debug("Network decay data unavailable: %s", e)
+
     if conn:
         conn.close()
 
@@ -1698,6 +1718,7 @@ def run_telegram_briefing() -> dict:
         homelab_data=homelab_data,
         domains_data=domains_data,
         time_data=time_data,
+        network_data=network_data,
     )
 
     try:

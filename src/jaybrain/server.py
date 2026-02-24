@@ -2096,6 +2096,91 @@ def graph_list(
 
 
 # =============================================================================
+# Network Decay (4)
+# =============================================================================
+
+@mcp.tool()
+def contact_add(
+    name: str,
+    contact_type: str = "professional",
+    company: str = "",
+    role: str = "",
+    how_met: str = "",
+    decay_threshold_days: int = 30,
+) -> str:
+    """Add a professional contact for relationship tracking.
+
+    Creates a person entity in the knowledge graph with decay metadata.
+    The contact will appear in network health checks and daily briefings
+    when outreach is overdue.
+    """
+    from .network_decay import add_contact
+
+    try:
+        result = add_contact(
+            name, contact_type, company, role, how_met, decay_threshold_days,
+        )
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("contact_add failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def contact_log(name: str, note: str = "") -> str:
+    """Log an interaction with a contact (resets their decay timer).
+
+    Use when JJ mentions talking to someone: "I talked to John today".
+    Updates last_contact timestamp and increments contact_count.
+    """
+    from .network_decay import log_interaction
+
+    try:
+        result = log_interaction(name, note)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("contact_log failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def contact_list(stale_only: bool = False) -> str:
+    """List tracked contacts with decay status.
+
+    Shows each contact's days since last interaction, threshold,
+    and whether they're overdue. Use stale_only=True to see only
+    contacts needing attention.
+    """
+    from .network_decay import get_stale_contacts
+
+    try:
+        contacts = get_stale_contacts()
+        if stale_only:
+            contacts = [c for c in contacts if c["overdue_by"] > 0]
+        return json.dumps({"count": len(contacts), "contacts": contacts})
+    except Exception as e:
+        logger.error("contact_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def network_health() -> str:
+    """Get a summary of professional network health.
+
+    Returns total contacts, healthy/stale counts, and the most
+    neglected contact. Use for quick network status checks.
+    """
+    from .network_decay import get_network_health
+
+    try:
+        result = get_network_health()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("network_health failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Homelab Tools (7)
 # =============================================================================
 

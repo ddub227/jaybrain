@@ -218,6 +218,11 @@ TIME_ALLOCATION_CWD_MAP = {
 TIME_ALLOCATION_IDLE_THRESHOLD_MIN = 30  # gaps > this between tool calls = idle
 TIME_ALLOCATION_LOOKBACK_DAYS = 7
 
+# --- Network Decay ---
+NETWORK_DECAY_DEFAULT_DAYS = 30      # default threshold for new contacts
+NETWORK_DECAY_NUDGE_DAY = "wed"      # day of week for heartbeat check
+NETWORK_DECAY_NUDGE_HOUR = 9
+
 # --- Heartbeat ---
 HEARTBEAT_FORGE_DUE_THRESHOLD = 5  # notify when this many concepts are due
 HEARTBEAT_APP_STALE_DAYS = 7  # flag apps sitting in "applied" this long

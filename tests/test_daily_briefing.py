@@ -392,6 +392,37 @@ class TestFormatTelegramBriefing:
         assert "EXAM COUNTDOWN" in msg
         assert "Security+" in msg
 
+    def test_network_section(self):
+        """Network section shows stale contacts."""
+        network = {
+            "total_contacts": 3,
+            "healthy_count": 1,
+            "stale_count": 2,
+            "contacts": [
+                {"name": "Alice", "company": "Acme", "overdue_by": 15},
+                {"name": "Bob", "company": "", "overdue_by": 5},
+                {"name": "Carol", "company": "Good", "overdue_by": -10},
+            ],
+        }
+        msg = format_telegram_briefing(EMPTY_TASKS, EMPTY_PIPELINE, EMPTY_FORGE, [], network_data=network)
+        assert "NETWORK (2 stale)" in msg
+        assert "Alice (Acme) -- 15d overdue" in msg
+        assert "Bob -- 5d overdue" in msg
+        assert "Carol" not in msg  # healthy, not shown
+
+    def test_network_section_omitted_when_healthy(self):
+        """Network section omitted when no stale contacts."""
+        network = {
+            "total_contacts": 2,
+            "healthy_count": 2,
+            "stale_count": 0,
+            "contacts": [
+                {"name": "A", "company": "", "overdue_by": -10},
+            ],
+        }
+        msg = format_telegram_briefing(EMPTY_TASKS, EMPTY_PIPELINE, EMPTY_FORGE, [], network_data=network)
+        assert "NETWORK" not in msg
+
     def test_life_domains_section(self):
         domains = {
             "domains": [

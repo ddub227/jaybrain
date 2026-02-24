@@ -481,4 +481,16 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register event_discovery module", exc_info=True)
 
+    # Phase 5: Job board auto-fetch (Wednesday 10 AM weekly)
+    try:
+        from .job_boards import auto_fetch_boards
+        dm.register_module(
+            "job_board_autofetch",
+            auto_fetch_boards,
+            CronTrigger(day_of_week="wed", hour=10, minute=0),
+            "Weekly job board change detection",
+        )
+    except Exception:
+        logger.error("Failed to register job_board_autofetch module", exc_info=True)
+
     return dm

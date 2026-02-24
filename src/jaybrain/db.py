@@ -352,6 +352,15 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         _set_schema_version(conn, 11, "Add events, onboarding, personality tables")
         conn.commit()
 
+    # --- Migration 12: Add content_hash to job_boards for change detection ---
+    if current < 12:
+        try:
+            conn.execute("ALTER TABLE job_boards ADD COLUMN content_hash TEXT DEFAULT ''")
+        except Exception:
+            pass  # column already exists
+        _set_schema_version(conn, 12, "Add job_boards.content_hash for auto-fetch")
+        conn.commit()
+
 
 SCHEMA_SQL = f"""
 -- Memories table
@@ -584,6 +593,7 @@ CREATE TABLE IF NOT EXISTS job_boards (
     tags TEXT NOT NULL DEFAULT '[]',
     active INTEGER NOT NULL DEFAULT 1,
     last_checked TEXT,
+    content_hash TEXT DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

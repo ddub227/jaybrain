@@ -104,7 +104,7 @@ def check_forge_study_evening() -> dict:
 
 
 def _check_forge_study(check_name: str, time_of_day: str) -> dict:
-    """Core forge study check logic."""
+    """Core forge study check with queue depth, streak, and exam awareness."""
     ensure_data_dirs()
     conn = get_connection()
     try:
@@ -116,38 +116,143 @@ def _check_forge_study(check_name: str, time_of_day: str) -> dict:
             (today,),
         ).fetchone()[0]
 
-        # Check streak
-        streak_row = conn.execute(
-            "SELECT date FROM forge_streaks ORDER BY date DESC LIMIT 1"
-        ).fetchone()
-        studied_today = streak_row and streak_row["date"] == today if streak_row else False
+        # Count new (never reviewed) concepts
+        new_count = conn.execute(
+            "SELECT COUNT(*) FROM forge_concepts WHERE review_count = 0"
+        ).fetchone()[0]
 
-        if due_count < HEARTBEAT_FORGE_DUE_THRESHOLD and studied_today:
+        # Count struggling (mastery < 0.3, reviewed at least once)
+        struggling_count = conn.execute(
+            "SELECT COUNT(*) FROM forge_concepts"
+            " WHERE mastery_level < 0.3 AND review_count > 0"
+        ).fetchone()[0]
+
+        # Streak: count consecutive days ending today or yesterday
+        streak_rows = conn.execute(
+            "SELECT date FROM forge_streaks ORDER BY date DESC LIMIT 60"
+        ).fetchall()
+        studied_today = bool(streak_rows) and streak_rows[0]["date"] == today
+        streak_length = _calculate_streak(streak_rows, today)
+
+        # Exam proximity
+        days_to_exam = _days_to_exam()
+
+        # Adaptive threshold: lower the bar as exam approaches
+        threshold = HEARTBEAT_FORGE_DUE_THRESHOLD
+        if days_to_exam is not None and days_to_exam <= 7:
+            threshold = 1  # any due concept matters in the final week
+
+        if due_count < threshold and studied_today:
             _log_check(check_name, False, "No action needed", False)
-            return {"triggered": False, "due_count": due_count, "studied_today": studied_today}
+            return {
+                "triggered": False, "due_count": due_count,
+                "studied_today": studied_today, "streak": streak_length,
+            }
 
         # Build notification
         parts = []
         if time_of_day == "morning":
-            parts.append(f"You have {due_count} concepts due for review.")
-            if not studied_today:
-                parts.append("No study logged yet today -- your streak is at risk.")
+            # Lead with exam urgency if close
+            if days_to_exam is not None and days_to_exam <= 7:
+                parts.append(f"[{days_to_exam}d to exam]")
+
+            # Queue summary
+            queue_parts = []
+            if due_count:
+                queue_parts.append(f"{due_count} due")
+            if struggling_count:
+                queue_parts.append(f"{struggling_count} struggling")
+            if new_count:
+                queue_parts.append(f"{new_count} new")
+            if queue_parts:
+                parts.append("Study queue: " + ", ".join(queue_parts) + ".")
+
+            # Streak info
+            if studied_today:
+                if streak_length >= 3:
+                    parts.append(f"Streak: {streak_length} days -- keep it going.")
+            else:
+                if streak_length > 0:
+                    parts.append(
+                        f"{streak_length}-day streak at risk -- study today to keep it."
+                    )
+                else:
+                    parts.append("Start a new streak today.")
         else:
+            # Evening: focus on streak risk
             if not studied_today:
-                parts.append("No study session today. Quick 10-minute review can keep your streak alive.")
-            if due_count >= HEARTBEAT_FORGE_DUE_THRESHOLD:
-                parts.append(f"{due_count} concepts are overdue.")
+                if streak_length > 0:
+                    parts.append(
+                        f"No study today -- {streak_length}-day streak expires at midnight."
+                    )
+                else:
+                    parts.append("No study today. A quick 10-minute session starts a streak.")
+                if due_count:
+                    parts.append(f"{due_count} concepts waiting for review.")
 
         message = " ".join(parts)
         if parts:
             dispatch_notification(check_name, message)
 
-        return {"triggered": True, "due_count": due_count, "studied_today": studied_today, "message": message}
+        return {
+            "triggered": True, "due_count": due_count, "new_count": new_count,
+            "struggling_count": struggling_count, "studied_today": studied_today,
+            "streak": streak_length, "days_to_exam": days_to_exam, "message": message,
+        }
     except Exception as e:
         logger.error("check_forge_study failed: %s", e)
         return {"error": str(e)}
     finally:
         conn.close()
+
+
+def _calculate_streak(streak_rows: list, today: str) -> int:
+    """Count consecutive study days ending today or yesterday."""
+    if not streak_rows:
+        return 0
+    from datetime import date as date_type
+
+    today_d = datetime.strptime(today, "%Y-%m-%d").date()
+    dates = []
+    for r in streak_rows:
+        try:
+            dates.append(datetime.strptime(r["date"], "%Y-%m-%d").date())
+        except (ValueError, TypeError):
+            continue
+
+    if not dates:
+        return 0
+
+    # Allow starting from today or yesterday
+    expected = today_d
+    if dates[0] != today_d:
+        if dates[0] == today_d - timedelta(days=1):
+            expected = dates[0]
+        else:
+            return 0
+
+    streak = 0
+    for d in dates:
+        if d == expected:
+            streak += 1
+            expected = d - timedelta(days=1)
+        else:
+            break
+    return streak
+
+
+def _days_to_exam() -> Optional[int]:
+    """Return days until the configured exam date, or None if not set/past."""
+    if not SECURITY_PLUS_EXAM_DATE:
+        return None
+    try:
+        exam = datetime.strptime(SECURITY_PLUS_EXAM_DATE, "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+        days = (exam - datetime.now(timezone.utc)).days
+        return days if days >= 0 else None
+    except ValueError:
+        return None
 
 
 def check_exam_countdown() -> dict:
@@ -373,6 +478,12 @@ def _check_network_decay_wrapper() -> dict:
     return check_network_decay()
 
 
+def _check_job_board_autofetch_wrapper() -> dict:
+    """Wrapper to call job_boards.auto_fetch_boards()."""
+    from .job_boards import auto_fetch_boards
+    return auto_fetch_boards()
+
+
 def run_single_check(check_name: str) -> dict:
     """Run a single heartbeat check by name."""
     checks = {
@@ -385,6 +496,7 @@ def run_single_check(check_name: str) -> dict:
         "goal_staleness": check_goal_staleness,
         "time_allocation": _check_time_allocation_wrapper,
         "network_decay": _check_network_decay_wrapper,
+        "job_board_autofetch": _check_job_board_autofetch_wrapper,
     }
 
     func = checks.get(check_name)

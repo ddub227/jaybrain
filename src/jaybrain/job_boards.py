@@ -2,10 +2,12 @@
 
 Registers job board URLs to monitor, fetches pages, and strips HTML
 boilerplate so Claude can parse the cleaned text and extract postings.
+Includes auto-fetch for daemon-driven change detection.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -126,3 +128,77 @@ def fetch_board(
         }
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Auto-fetch: daemon-driven change detection
+# ---------------------------------------------------------------------------
+
+def _content_hash(text: str) -> str:
+    """SHA-256 hash of content for change detection."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def auto_fetch_boards() -> dict:
+    """Fetch all active boards, detect content changes, notify via Telegram.
+
+    Called by the daemon on a weekly schedule. For each active board:
+    1. Fetch the page content via the scraping pipeline.
+    2. Hash the content and compare against the stored content_hash.
+    3. If changed, send a Telegram notification and update the hash.
+
+    Returns a summary dict with counts of checked/changed/errored boards.
+    """
+    boards = get_boards(active_only=True)
+    if not boards:
+        return {"checked": 0, "changed": 0, "errors": 0, "message": "No active boards"}
+
+    checked = 0
+    changed = 0
+    errors = 0
+    changed_boards: list[str] = []
+
+    for board in boards:
+        try:
+            result = fetch_board(board.id, max_pages=1, render="auto")
+            content = result.get("content", "")
+            new_hash = _content_hash(content)
+
+            conn = get_connection()
+            try:
+                row = get_job_board(conn, board.id)
+                old_hash = row["content_hash"] if row and row["content_hash"] else ""
+
+                if new_hash != old_hash:
+                    update_job_board(conn, board.id, content_hash=new_hash)
+                    changed += 1
+                    changed_boards.append(f"{board.name} ({board.url})")
+            finally:
+                conn.close()
+
+            checked += 1
+        except Exception as e:
+            logger.error("Auto-fetch failed for board %s (%s): %s", board.name, board.id, e)
+            errors += 1
+
+    # Notify on changes
+    if changed_boards:
+        try:
+            from .telegram import send_telegram_message
+            lines = [f"{len(changed_boards)} job board(s) have new content:"]
+            for name in changed_boards[:10]:
+                lines.append(f"  - {name}")
+            if len(changed_boards) > 10:
+                lines.append(f"  ... and {len(changed_boards) - 10} more")
+            send_telegram_message("\n".join(lines))
+        except Exception as e:
+            logger.error("Failed to send job board change notification: %s", e)
+
+    summary = {
+        "checked": checked,
+        "changed": changed,
+        "errors": errors,
+        "changed_boards": changed_boards,
+    }
+    logger.info("Auto-fetch complete: %s", summary)
+    return summary

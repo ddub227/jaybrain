@@ -1,6 +1,6 @@
 # JayBrain Long-Term Build Queue
 
-Last updated: 2026-02-23
+Last updated: 2026-02-24
 
 ## Hardware Profile
 
@@ -39,9 +39,9 @@ That's comfortable on 16 GB with ~5 GB headroom.
 
 - **Modules:** 15+ in `src/jaybrain/`
 - **MCP Tools:** 137 registered
-- **Daemon Jobs:** 13 scheduled modules + 1 heartbeat
+- **Daemon Jobs:** 14 scheduled modules + 1 heartbeat
 - **Dependencies:** 14 required + 4 optional
-- **Tests:** 730 passing
+- **Tests:** 737 passing
 - **Lines of code:** ~16,500 (src/jaybrain/)
 
 ## Completed Features
@@ -68,35 +68,26 @@ That's comfortable on 16 GB with ~5 GB headroom.
 - [x] Conversation archive to Google Docs
 - [x] Event discovery
 - [x] Heartbeat notifications (7 check types)
-- [x] Pre-commit security (gitleaks + bandit)
+- [x] Pre-commit security (gitleaks + bandit + pip-audit)
+- [x] Job board auto-fetch with change detection
+- [x] Adversarial security auditor (AUDITOR_CLAUDE.md + launch script)
+- [x] SynapseForge study scheduling (enhanced heartbeat with queue depth, streak, exam proximity)
 
 ## Build Queue
 
 ### Near-Term (ready to build)
 
-#### 1. pip-audit Pre-Commit Addition
-**Resource cost:** Zero (runs on commit only, <2s)
-**What:** Add pip-audit to pre-commit hook to scan dependencies for known CVEs.
-**Why:** 14 dependencies including google-api, anthropic, requests -- all have had CVEs.
-**Verdict: BUILD IT.** Negligible resource cost, high value.
+#### ~~1. pip-audit Pre-Commit Addition~~ SHIPPED (2026-02-23)
+Added to pre-commit hook. Scans dependencies for known CVEs on every commit.
 
-#### 2. Job Board Monitoring Automation
-**Resource cost:** Low (daemon cron job, ~30s network call weekly)
-**What:** Scheduled fetch of registered job boards, auto-create postings, notify on matches.
-**Why:** 68 job boards registered but manual fetch only. Automate the pipeline.
-**Verdict: BUILD IT.** Deferred until after Security+ exam. Lightweight daemon job.
+#### ~~2. Job Board Monitoring Automation~~ SHIPPED (2026-02-24)
+Daemon module `job_board_autofetch` runs Wednesday 10 AM. Fetches all active boards, computes SHA-256 content hash, detects changes, sends Telegram notification. Content hash stored in `job_boards.content_hash` column (migration 12).
 
-#### 3. Adversarial Security Auditor Session
-**Resource cost:** Zero ongoing (runs as a separate one-time Claude Code session)
-**What:** Dedicated Claude Code session with adversarial prompt for periodic codebase review.
-**Why:** Independent review catches architectural/logic issues that automated tools miss.
-**Verdict: BUILD IT.** Post-Security+ exam. No resource cost beyond session time.
+#### ~~3. Adversarial Security Auditor Session~~ SHIPPED (2026-02-24)
+`AUDITOR_CLAUDE.md` provides adversarial system prompt with zero project context. `scripts/run_auditor.py` launches a read-only Claude Code session that audits every file in `src/jaybrain/` and produces a structured report (SECURITY / ARCHITECTURE / COMPLEXITY / TECHNICAL DEBT).
 
-#### 4. SynapseForge Study Scheduling
-**Resource cost:** Negligible (daemon cron job, pure SQLite queries)
-**What:** Automated study session reminders based on spaced repetition schedules.
-**Why:** Currently paused -- JJ is in cram mode for Security+. Revisit after certification.
-**Verdict: DEFER.** Revisit when starting a new certification (post-Security+).
+#### ~~4. SynapseForge Study Scheduling~~ SHIPPED (2026-02-24)
+Enhanced `heartbeat.py` forge study checks with: queue depth (due + new + struggling counts), streak length calculation, exam proximity awareness, adaptive threshold (lowers to 1 when exam <=7 days). Morning/evening notifications include rich context.
 
 ### Medium-Term (needs design work)
 

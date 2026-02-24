@@ -4,11 +4,12 @@
 Usage:
     python scripts/run_auditor.py [--output FILE]
 
-Spawns a Claude Code session with AUDITOR_CLAUDE.md as its project
-instructions. The auditor reads the entire codebase and produces a
-structured security/architecture report.
+Runs a Claude Code session from the auditor/ directory, which has its own
+CLAUDE.md with adversarial instructions and ZERO JayBrain context. The
+session is strictly read-only -- it can only use Read, Glob, Grep, and
+Bash tools. Edit/Write are explicitly blocked.
 
-The auditor session is read-only -- it never modifies files.
+The auditor's report is captured from stdout and saved to a file.
 """
 
 import argparse
@@ -18,7 +19,8 @@ from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-AUDITOR_MD = PROJECT_ROOT / "AUDITOR_CLAUDE.md"
+AUDITOR_DIR = PROJECT_ROOT / "auditor"
+AUDITOR_MD = AUDITOR_DIR / "CLAUDE.md"
 DEFAULT_OUTPUT = (
     PROJECT_ROOT
     / "data"
@@ -40,39 +42,61 @@ def main() -> None:
 
     if not AUDITOR_MD.exists():
         print(f"Error: {AUDITOR_MD} not found.")
+        print(f"Expected at: {AUDITOR_DIR}")
         sys.exit(1)
 
     # Ensure output directory exists
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     prompt = (
-        "You are the adversarial security auditor. Follow AUDITOR_CLAUDE.md exactly. "
-        "Read every Python file in src/jaybrain/ and produce the full structured report. "
-        "Start by listing all .py files in src/jaybrain/, then read and audit each one. "
-        f"Write the final report to {args.output}."
+        "Read every .py file in ../src/jaybrain/ and ../pyproject.toml. "
+        "Produce the full structured audit report as described in your CLAUDE.md. "
+        "Start by listing all .py files, then read and audit each one systematically. "
+        "Output the complete report as your response text."
     )
 
-    print(f"Launching auditor session...")
+    print("Launching adversarial security auditor...")
     print(f"  Instructions: {AUDITOR_MD}")
-    print(f"  Output: {args.output}")
+    print(f"  Codebase:     {PROJECT_ROOT / 'src' / 'jaybrain'}")
+    print(f"  Output:        {args.output}")
+    print(f"  Mode:          READ-ONLY (Edit/Write blocked)")
     print()
 
     try:
+        # Run from auditor/ so it picks up auditor/CLAUDE.md, NOT the root CLAUDE.md.
+        # --print: non-interactive, report goes to stdout.
+        # --disallowedTools: block all write tools as a hard safety layer.
         result = subprocess.run(
             [
                 "claude",
                 "--print",
                 "--dangerously-skip-permissions",
                 "--max-turns", "50",
+                "--disallowedTools", "Edit,Write,NotebookEdit",
                 prompt,
             ],
-            cwd=str(PROJECT_ROOT),
+            cwd=str(AUDITOR_DIR),
+            capture_output=True,
+            text=True,
         )
-        if result.returncode == 0:
-            print(f"\nAudit complete. Report: {args.output}")
+
+        report = result.stdout
+
+        if report.strip():
+            args.output.write_text(report, encoding="utf-8")
+            print(f"Audit complete. Report saved to: {args.output}")
+            print(f"Report length: {len(report):,} characters")
         else:
-            print(f"\nAudit session exited with code {result.returncode}")
-            sys.exit(result.returncode)
+            print("Warning: auditor produced no output.")
+            if result.stderr:
+                print(f"Stderr: {result.stderr[:500]}")
+            sys.exit(1)
+
+        if result.returncode != 0:
+            print(f"Auditor exited with code {result.returncode}")
+            if result.stderr:
+                print(f"Stderr: {result.stderr[:500]}")
+
     except FileNotFoundError:
         print("Error: 'claude' CLI not found. Is Claude Code installed?")
         sys.exit(1)

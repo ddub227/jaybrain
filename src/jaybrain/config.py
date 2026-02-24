@@ -192,6 +192,10 @@ DAEMON_PID_FILE = DATA_DIR / "daemon.pid"
 DAEMON_LOG_FILE = DATA_DIR / "daemon.log"
 DAEMON_HEARTBEAT_INTERVAL = 60  # seconds between heartbeat writes
 
+# --- Daily Briefing ---
+DAILY_BRIEFING_HOUR = 7
+DAILY_BRIEFING_MINUTE = 0
+
 # --- Conversation Archive ---
 CLAUDE_PROJECTS_DIR = Path(os.path.expanduser("~")) / ".claude" / "projects"
 CONVERSATION_ARCHIVE_HOUR = 2  # 2 AM daily

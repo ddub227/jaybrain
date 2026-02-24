@@ -500,6 +500,16 @@ def collect_calendar(creds) -> dict:
         return {"events": [], "count": 0, "error": str(e)}
 
 
+def collect_time_allocation() -> dict:
+    """Collect time allocation data from Pulse sessions."""
+    try:
+        from .time_allocation import get_weekly_report
+        return get_weekly_report()
+    except Exception as e:
+        logger.error("Failed to collect time allocation: %s", e)
+        return {"domains": [], "total_actual": 0.0, "total_target": 0.0, "error": str(e)}
+
+
 def collect_news() -> dict:
     """Collect top headlines from NewsAPI (general + tech)."""
     from .config import NEWSAPI_KEY, NEWSAPI_BASE_URL
@@ -1478,6 +1488,226 @@ def run_briefing() -> dict:
         }
     else:
         return {"status": "failed", "error": "Email send failed. Check logs."}
+
+
+# ---------------------------------------------------------------------------
+# Telegram Briefing
+# ---------------------------------------------------------------------------
+
+
+def _fmt_section(title: str, lines: list[str]) -> str:
+    """Format a section with a title and indented lines. Omits if no lines."""
+    if not lines:
+        return ""
+    body = "\n".join(f"  {line}" for line in lines)
+    return f"\n{title}\n{body}"
+
+
+def format_telegram_briefing(
+    tasks_data: dict,
+    pipeline_data: dict,
+    forge_data: dict,
+    deadlines: list[dict],
+    calendar_data: Optional[dict] = None,
+    homelab_data: Optional[dict] = None,
+    domains_data: Optional[dict] = None,
+    time_data: Optional[dict] = None,
+) -> str:
+    """Format collected data as a plain-text Telegram message.
+
+    Sections with no data are omitted. Keeps the message concise for
+    quick morning scanning on mobile.
+    """
+    today = date.today()
+    day_name = today.strftime("%A")
+    date_display = today.strftime("%b %d, %Y")
+    parts = [f"JayBrain Daily Briefing -- {day_name}, {date_display}"]
+
+    # Calendar
+    if calendar_data and calendar_data.get("events"):
+        events = calendar_data["events"]
+        lines = []
+        for e in events:
+            if e.get("all_day"):
+                lines.append(f"[All day] {e['summary']}")
+            else:
+                try:
+                    start_dt = datetime.fromisoformat(e["start"])
+                    time_str = start_dt.strftime("%I:%M %p").lstrip("0")
+                except Exception:
+                    time_str = e.get("start", "")
+                loc = f" [{e['location']}]" if e.get("location") else ""
+                lines.append(f"{time_str} - {e['summary']}{loc}")
+        parts.append(_fmt_section(f"CALENDAR ({len(events)} event{'s' if len(events) != 1 else ''})", lines))
+
+    # Exam countdown
+    from .config import SECURITY_PLUS_EXAM_DATE
+    if SECURITY_PLUS_EXAM_DATE:
+        try:
+            exam_date = datetime.strptime(SECURITY_PLUS_EXAM_DATE, "%Y-%m-%d")
+            days_left = (exam_date.date() - today).days
+            if 0 <= days_left <= 14:
+                avg = forge_data.get("avg_mastery", 0.0)
+                parts.append(_fmt_section("EXAM COUNTDOWN", [
+                    f"Security+ in {days_left} day{'s' if days_left != 1 else ''} | Avg mastery: {int(avg * 100)}%"
+                ]))
+        except ValueError:
+            pass
+
+    # Deadlines
+    if deadlines:
+        lines = []
+        for d in deadlines:
+            prefix = "[OVERDUE] " if d.get("overdue") else ""
+            lines.append(f"{prefix}{d['title']} ({d['due_date']})")
+        parts.append(_fmt_section(f"DEADLINES ({len(deadlines)})", lines))
+
+    # Tasks
+    tasks = tasks_data.get("tasks", [])
+    overdue = tasks_data.get("overdue_count", 0)
+    if tasks:
+        count_str = f"{len(tasks)} active"
+        if overdue:
+            count_str += f", {overdue} overdue"
+        lines = []
+        for t in tasks[:8]:
+            lines.append(f"[{t['priority']}] {t['title']}")
+        if len(tasks) > 8:
+            lines.append(f"...and {len(tasks) - 8} more")
+        parts.append(_fmt_section(f"TASKS ({count_str})", lines))
+
+    # Time allocation
+    if time_data and time_data.get("domains"):
+        lines = []
+        for d in time_data["domains"]:
+            if d["target_hours"] > 0 or d["actual_hours"] > 0:
+                # Shorten long domain names
+                name = d["name"].split(" -- ")[0].split(" (")[0]
+                status_tag = ""
+                if d["status"] == "under":
+                    status_tag = " << under"
+                elif d["status"] == "over":
+                    status_tag = " >> over"
+                lines.append(
+                    f"{name}: {d['actual_hours']}h / {d['target_hours']}h ({d['pct']:.0f}%){status_tag}"
+                )
+        total_actual = time_data.get("total_actual", 0)
+        total_target = time_data.get("total_target", 0)
+        if total_target > 0:
+            lines.append(f"Total: {total_actual}h / {total_target}h")
+        parts.append(_fmt_section(f"TIME ALLOCATION ({time_data.get('period_days', 7)}-day)", lines))
+
+    # Life domains
+    if domains_data and domains_data.get("domains"):
+        lines = []
+        for dom in domains_data["domains"][:6]:
+            active = dom.get("active_goal_count", 0)
+            progress = int(dom.get("progress", 0) * 100)
+            name = dom["name"].split(" -- ")[0].split(" (")[0]
+            if active > 0:
+                lines.append(f"{name} ({active} goals, {progress}%)")
+        if lines:
+            parts.append(_fmt_section("LIFE DOMAINS", lines))
+
+    # Job pipeline
+    pipeline = pipeline_data.get("pipeline", {})
+    active_apps = pipeline_data.get("active_apps", [])
+    if pipeline or active_apps:
+        lines = []
+        status_counts = []
+        for status_name in ["discovered", "preparing", "ready", "applied", "interviewing", "offered"]:
+            cnt = pipeline.get(status_name, 0)
+            if cnt > 0:
+                status_counts.append(f"{cnt} {status_name}")
+        if status_counts:
+            lines.append(" | ".join(status_counts))
+        for a in active_apps[:3]:
+            lines.append(f"{a['company']} - {a['title']} [{a['status']}]")
+        if lines:
+            parts.append(_fmt_section("JOB PIPELINE", lines))
+
+    # Homelab
+    if homelab_data and not homelab_data.get("error"):
+        lines = []
+        past = homelab_data.get("past_entries", [])
+        if past:
+            latest = past[0]
+            lines.append(f"Last: {latest.get('date', '?')} -- {latest.get('title', '?')}")
+        next_steps = homelab_data.get("next_steps", [])
+        if next_steps:
+            lines.append(f"Next: {next_steps[0]}")
+        if lines:
+            parts.append(_fmt_section("HOMELAB", lines))
+
+    # SynapseForge (brief)
+    if forge_data.get("total_concepts", 0) > 0:
+        due = forge_data.get("due_count", 0)
+        streak = forge_data.get("current_streak", 0)
+        avg = forge_data.get("avg_mastery", 0.0)
+        lines = [
+            f"{forge_data['total_concepts']} concepts | {due} due | Streak: {streak}d | Mastery: {int(avg * 100)}%"
+        ]
+        parts.append(_fmt_section("SYNAPSEFORGE", lines))
+
+    return "\n".join(p for p in parts if p)
+
+
+def run_telegram_briefing() -> dict:
+    """Collect all data, format for Telegram, and send.
+
+    This is the daemon entry point -- runs daily at the configured hour.
+    """
+    logger.info("Starting Telegram daily briefing")
+
+    conn = _get_db_connection()
+
+    if conn:
+        tasks_data = collect_tasks(conn)
+        pipeline_data = collect_job_pipeline(conn)
+        forge_data = collect_forge_stats(conn)
+        deadlines = collect_upcoming_deadlines(conn)
+    else:
+        tasks_data = {"tasks": [], "overdue_count": 0, "error": "Database unavailable"}
+        pipeline_data = {"pipeline": {}, "active_apps": []}
+        forge_data = {"total_concepts": 0, "due_count": 0, "avg_mastery": 0.0,
+                      "mastery_distribution": {}, "current_streak": 0,
+                      "total_reviews": 0, "subjects": []}
+        deadlines = []
+
+    google_creds = _get_google_credentials()
+    calendar_data = collect_calendar(google_creds) if google_creds else None
+    homelab_data = collect_homelab()
+    time_data = collect_time_allocation()
+
+    domains_data = None
+    try:
+        from .life_domains import get_domain_overview
+        domains_data = get_domain_overview()
+    except Exception as e:
+        logger.debug("Life domains data unavailable: %s", e)
+
+    if conn:
+        conn.close()
+
+    message = format_telegram_briefing(
+        tasks_data=tasks_data,
+        pipeline_data=pipeline_data,
+        forge_data=forge_data,
+        deadlines=deadlines,
+        calendar_data=calendar_data,
+        homelab_data=homelab_data,
+        domains_data=domains_data,
+        time_data=time_data,
+    )
+
+    try:
+        from .telegram import send_telegram_message
+        result = send_telegram_message(message)
+        logger.info("Telegram briefing sent: %s", result.get("status", "unknown"))
+        return {"status": "sent", "length": len(message), "telegram": result}
+    except Exception as e:
+        logger.error("Failed to send Telegram briefing: %s", e, exc_info=True)
+        return {"status": "failed", "error": str(e)}
 
 
 def main() -> int:

@@ -25,6 +25,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 from .config import (
     DAEMON_HEARTBEAT_INTERVAL,
     DAEMON_PID_FILE,
+    DAILY_BRIEFING_HOUR,
+    DAILY_BRIEFING_MINUTE,
     DB_PATH,
     ensure_data_dirs,
 )
@@ -357,6 +359,18 @@ def build_daemon() -> DaemonManager:
         )
     except ImportError:
         logger.debug("conversation_archive module not available, skipping")
+
+    # Phase 1b: Daily Telegram briefing
+    try:
+        from .daily_briefing import run_telegram_briefing
+        dm.register_module(
+            "daily_briefing",
+            run_telegram_briefing,
+            CronTrigger(hour=DAILY_BRIEFING_HOUR, minute=DAILY_BRIEFING_MINUTE),
+            "Morning Telegram briefing digest",
+        )
+    except ImportError:
+        logger.debug("daily_briefing module not available, skipping")
 
     # Phase 2: Life domains weekly sync (Sunday 3 AM) + daily metrics (6:30 AM)
     try:

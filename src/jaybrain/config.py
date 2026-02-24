@@ -5,6 +5,26 @@ from pathlib import Path
 
 # Base directories
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+
+def _load_env() -> None:
+    """Load .env file from project root if present. Existing env vars take priority."""
+    env_file = PROJECT_ROOT / ".env"
+    if not env_file.exists():
+        return
+    with open(env_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if not os.environ.get(key):
+                os.environ[key] = value
+
+
+_load_env()
 DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = DATA_DIR / "jaybrain.db"
 MEMORIES_DIR = DATA_DIR / "memories"

@@ -359,8 +359,8 @@ def build_daemon() -> DaemonManager:
             CronTrigger(hour=2, minute=0),
             "Nightly conversation archive to Google Docs",
         )
-    except ImportError:
-        logger.debug("conversation_archive module not available, skipping")
+    except Exception:
+        logger.error("Failed to register conversation_archive module", exc_info=True)
 
     # Phase 1b: Daily Telegram briefing
     try:
@@ -371,8 +371,8 @@ def build_daemon() -> DaemonManager:
             CronTrigger(hour=DAILY_BRIEFING_HOUR, minute=DAILY_BRIEFING_MINUTE),
             "Morning Telegram briefing digest",
         )
-    except ImportError:
-        logger.debug("daily_briefing module not available, skipping")
+    except Exception:
+        logger.error("Failed to register daily_briefing module", exc_info=True)
 
     # Phase 2: Life domains weekly sync (Sunday 3 AM) + daily metrics (6:30 AM)
     try:
@@ -389,8 +389,8 @@ def build_daemon() -> DaemonManager:
             CronTrigger(hour=6, minute=30),
             "Daily auto-metric collection for goals",
         )
-    except ImportError:
-        logger.debug("life_domains module not available, skipping")
+    except Exception:
+        logger.error("Failed to register life_domains module", exc_info=True)
 
     # Phase 3: Heartbeat checks
     try:
@@ -438,8 +438,8 @@ def build_daemon() -> DaemonManager:
             CronTrigger(day_of_week="sun", hour=20, minute=0),
             "Weekly goal staleness check",
         )
-    except ImportError:
-        logger.debug("heartbeat module not available, skipping")
+    except Exception:
+        logger.error("Failed to register heartbeat module", exc_info=True)
 
     # Phase 3b: Time allocation weekly check (Sunday 8:30 PM)
     try:
@@ -450,8 +450,8 @@ def build_daemon() -> DaemonManager:
             CronTrigger(day_of_week="sun", hour=20, minute=30),
             "Weekly time allocation vs targets report",
         )
-    except ImportError:
-        logger.debug("time_allocation module not available, skipping")
+    except Exception:
+        logger.error("Failed to register time_allocation module", exc_info=True)
 
     # Phase 3c: Network decay midweek check
     try:
@@ -466,8 +466,8 @@ def build_daemon() -> DaemonManager:
             ),
             "Midweek network relationship check",
         )
-    except ImportError:
-        logger.debug("network_decay module not available, skipping")
+    except Exception:
+        logger.error("Failed to register network_decay module", exc_info=True)
 
     # Phase 4: Event discovery (Monday 8 AM)
     try:
@@ -478,7 +478,7 @@ def build_daemon() -> DaemonManager:
             CronTrigger(day_of_week="mon", hour=8, minute=0),
             "Weekly local event discovery",
         )
-    except ImportError:
-        logger.debug("event_discovery module not available, skipping")
+    except Exception:
+        logger.error("Failed to register event_discovery module", exc_info=True)
 
     return dm

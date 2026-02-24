@@ -116,6 +116,37 @@ def run_daemon() -> None:
         _run_daemon_posix(pid_file, log_file)
 
 
+def _fix_task_power_settings(task_name: str) -> None:
+    """Disable battery-related kill settings on the scheduled task.
+
+    By default, Task Scheduler sets StopIfGoingOnBatteries=True which
+    silently kills the daemon when the laptop unplugs. Fix via COM API.
+    """
+    try:
+        import ctypes.wintypes  # noqa: F401 -- ensures COM is importable
+
+        script = (
+            "$ts = New-Object -ComObject Schedule.Service; "
+            "$ts.Connect(); "
+            f"$t = $ts.GetFolder('\\').GetTask('{task_name}'); "
+            "$d = $t.Definition; "
+            "$d.Settings.DisallowStartIfOnBatteries = $false; "
+            "$d.Settings.StopIfGoingOnBatteries = $false; "
+            "$d.Settings.ExecutionTimeLimit = 'PT0S'; "
+            f"$ts.GetFolder('\\').RegisterTaskDefinition('{task_name}', $d, 6, $null, $null, 3) | Out-Null"
+        )
+        result = subprocess.run(
+            ["powershell", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            print("  Power settings: battery stop disabled, no time limit")
+        else:
+            print(f"  Warning: could not fix power settings: {result.stderr.strip()}")
+    except Exception as e:
+        print(f"  Warning: could not fix power settings: {e}")
+
+
 def _run_daemon_windows(pid_file: Path, log_file: Path) -> None:
     """Launch daemon via Windows Task Scheduler for reliable background operation."""
     script_path = str(Path(__file__).resolve())
@@ -145,6 +176,9 @@ def _run_daemon_windows(pid_file: Path, log_file: Path) -> None:
             print("Falling back to Popen (may not survive console close)...")
             _run_daemon_popen(pid_file, log_file)
             return
+
+        # Fix default power settings that kill daemon on battery
+        _fix_task_power_settings(task_name)
 
         # Run it now
         result = subprocess.run(

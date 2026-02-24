@@ -425,6 +425,18 @@ def build_daemon() -> DaemonManager:
     except ImportError:
         logger.debug("heartbeat module not available, skipping")
 
+    # Phase 3b: Time allocation weekly check (Sunday 8:30 PM)
+    try:
+        from .time_allocation import check_time_allocation
+        dm.register_module(
+            "time_allocation_weekly",
+            check_time_allocation,
+            CronTrigger(day_of_week="sun", hour=20, minute=30),
+            "Weekly time allocation vs targets report",
+        )
+    except ImportError:
+        logger.debug("time_allocation module not available, skipping")
+
     # Phase 4: Event discovery (Monday 8 AM)
     try:
         from .event_discovery import run_event_discovery

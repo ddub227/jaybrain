@@ -29,6 +29,7 @@ RATE_LIMIT_HOURS = {
     "stale_applications": 22,
     "session_crash": 2,
     "goal_staleness": 160,  # ~weekly
+    "time_allocation": 160,  # ~weekly
 }
 
 
@@ -359,6 +360,12 @@ def get_heartbeat_status() -> dict:
         conn.close()
 
 
+def _check_time_allocation_wrapper() -> dict:
+    """Wrapper to call time_allocation.check_time_allocation()."""
+    from .time_allocation import check_time_allocation
+    return check_time_allocation()
+
+
 def run_single_check(check_name: str) -> dict:
     """Run a single heartbeat check by name."""
     checks = {
@@ -369,6 +376,7 @@ def run_single_check(check_name: str) -> dict:
         "stale_applications": check_stale_applications,
         "session_crash": check_session_crash,
         "goal_staleness": check_goal_staleness,
+        "time_allocation": _check_time_allocation_wrapper,
     }
 
     func = checks.get(check_name)

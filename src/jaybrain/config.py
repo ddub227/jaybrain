@@ -203,6 +203,17 @@ LIFE_DOMAINS_DOC_ID = os.environ.get(
 )
 LIFE_DOMAINS_AVAILABLE_HOURS_WEEK = 40  # hours available outside work/sleep
 
+# --- Time Allocation ---
+TIME_ALLOCATION_CWD_MAP = {
+    "jaybrain": "JayBrain Development",
+    "homelab": "Learning",
+    "sigma-detection-rules": "Learning",
+    "ddub227.github.io": "Career",
+    "job_search": "Career",
+}
+TIME_ALLOCATION_IDLE_THRESHOLD_MIN = 30  # gaps > this between tool calls = idle
+TIME_ALLOCATION_LOOKBACK_DAYS = 7
+
 # --- Heartbeat ---
 HEARTBEAT_FORGE_DUE_THRESHOLD = 5  # notify when this many concepts are due
 HEARTBEAT_APP_STALE_DAYS = 7  # flag apps sitting in "applied" this long

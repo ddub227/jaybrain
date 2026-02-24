@@ -2317,6 +2317,50 @@ def pulse_context(
 
 
 # =============================================================================
+# Time Allocation Tools (2)
+# =============================================================================
+
+@mcp.tool()
+def time_allocation_report(days_back: int = 7) -> str:
+    """Weekly time allocation report: actual hours per domain vs targets.
+
+    Calculates active time from Pulse session data (tool call timestamps),
+    maps working directories to Life Domains, and compares against
+    hours_per_week targets. Uses 30-min idle threshold to handle sessions
+    left open.
+
+    Args:
+        days_back: Number of days to look back (default 7).
+    """
+    from .time_allocation import get_weekly_report
+
+    try:
+        return json.dumps(get_weekly_report(days_back))
+    except Exception as e:
+        logger.error("time_allocation_report failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def time_allocation_daily(days_back: int = 7) -> str:
+    """Daily breakdown of hours by domain.
+
+    Returns per-day time allocation data for the lookback period. Each day
+    shows hours spent in each domain, derived from Pulse activity logs.
+
+    Args:
+        days_back: Number of days to look back (default 7).
+    """
+    from .time_allocation import get_daily_breakdown
+
+    try:
+        return json.dumps(get_daily_breakdown(days_back))
+    except Exception as e:
+        logger.error("time_allocation_daily failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # GramCracker (Telegram Bot) Tools (2)
 # =============================================================================
 

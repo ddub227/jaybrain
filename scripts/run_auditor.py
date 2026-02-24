@@ -13,12 +13,29 @@ The auditor's report is captured from stdout and saved to a file.
 """
 
 import argparse
+import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Claude CLI installed via npm -- find it reliably across terminals
+NPM_GLOBAL_BIN = Path.home() / "AppData" / "Roaming" / "npm"
+
+
+def _find_claude() -> str:
+    """Find the claude CLI, checking PATH first then the npm global bin."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    # Check npm global bin directly (PowerShell often misses this)
+    for name in ("claude.cmd", "claude"):
+        candidate = NPM_GLOBAL_BIN / name
+        if candidate.exists():
+            return str(candidate)
+    return "claude"  # last resort, let subprocess raise FileNotFoundError
 AUDITOR_DIR = PROJECT_ROOT / "auditor"
 AUDITOR_MD = AUDITOR_DIR / "CLAUDE.md"
 DEFAULT_OUTPUT = (
@@ -70,9 +87,10 @@ def main() -> None:
         # Run from auditor/ so it picks up auditor/CLAUDE.md, NOT the root CLAUDE.md.
         # --print: non-interactive, report goes to stdout.
         # --disallowedTools: block all write tools as a hard safety layer.
+        claude_bin = _find_claude()
         result = subprocess.run(
             [
-                "claude",
+                claude_bin,
                 "--print",
                 "--dangerously-skip-permissions",
                 "--max-turns", "100",

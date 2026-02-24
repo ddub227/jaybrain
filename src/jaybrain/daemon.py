@@ -493,9 +493,15 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register job_board_autofetch module", exc_info=True)
 
-    # Phase 6: Trash sweep (daily 3 AM -- permanently delete expired entries)
+    # Phase 6: Trash -- weekly auto-cleanup (Sunday 2 AM) + daily expiry sweep (3 AM)
     try:
-        from .trash import sweep_expired
+        from .trash import run_auto_cleanup, sweep_expired
+        dm.register_module(
+            "trash_auto_cleanup",
+            run_auto_cleanup,
+            CronTrigger(day_of_week="sun", hour=2, minute=0),
+            "Weekly auto-cleanup of gitignored garbage",
+        )
         dm.register_module(
             "trash_sweep",
             sweep_expired,
@@ -503,6 +509,6 @@ def build_daemon() -> DaemonManager:
             "Daily sweep of expired trash entries",
         )
     except Exception:
-        logger.error("Failed to register trash_sweep module", exc_info=True)
+        logger.error("Failed to register trash module", exc_info=True)
 
     return dm

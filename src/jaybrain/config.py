@@ -252,6 +252,67 @@ SECURITY_PLUS_EXAM_DATE = "2026-03-01"
 EVENT_DISCOVERY_LOCATION = "Charlotte, NC"
 EVENTBRITE_API_KEY = os.environ.get("EVENTBRITE_API_KEY", "")
 
+# --- Trash / Soft-Delete ---
+TRASH_DIR = DATA_DIR / "trash"
+TRASH_DEFAULT_RETENTION_DAYS = 30
+TRASH_RETENTION_BY_CATEGORY = {
+    "bytecode": 7,
+    "build_artifact": 7,
+    "cache": 7,
+    "log": 14,
+    "temp": 14,
+    "source": 90,
+    "config": 90,
+    "general": 30,
+}
+
+# Directories to scan for garbage files
+TRASH_SCAN_DIRS = [
+    PROJECT_ROOT,                                          # jaybrain itself
+    Path(os.path.expanduser("~")) / "projects",            # all project repos
+]
+
+# Patterns that are always safe to auto-trash (must also be git-ignored)
+TRASH_AUTO_PATTERNS = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/.pytest_cache",
+    "**/.mypy_cache",
+    "**/.ruff_cache",
+    "**/htmlcov",
+    "**/.coverage",
+    "**/.coverage.*",
+    "**/*.egg-info",
+    "**/.tox",
+]
+
+# Patterns that are NEVER deleted regardless of anything else
+TRASH_PROTECTED_PATTERNS = [
+    "**/.git",
+    "**/.git/**",
+    "**/.env",
+    "**/pyproject.toml",
+    "**/setup.py",
+    "**/setup.cfg",
+    "**/LICENSE*",
+    "**/Makefile",
+    "**/.pre-commit-config.yaml",
+    "**/CLAUDE.md",
+    "**/node_modules/**",
+]
+
+# Suspicious file patterns that get flagged for review (not auto-trashed)
+TRASH_SUSPECT_PATTERNS = [
+    "null",             # stray null files from shell redirection
+    "**/*.tmp",
+    "**/*.bak",
+    "**/*.orig",
+    "**/*.swp",
+    "**/Thumbs.db",
+    "**/.DS_Store",
+]
+
 
 def ensure_data_dirs() -> None:
     """Create all required data directories if they don't exist."""
@@ -260,5 +321,6 @@ def ensure_data_dirs() -> None:
     SESSIONS_DIR.mkdir(exist_ok=True)
     MODELS_DIR.mkdir(exist_ok=True)
     FORGE_DIR.mkdir(exist_ok=True)
+    TRASH_DIR.mkdir(exist_ok=True)
     for category in MEMORY_CATEGORIES:
         (MEMORIES_DIR / category).mkdir(exist_ok=True)

@@ -361,6 +361,30 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         _set_schema_version(conn, 12, "Add job_boards.content_hash for auto-fetch")
         conn.commit()
 
+    # --- Migration 13: Trash manifest table ---
+    if current < 13:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS trash_manifest (
+                id TEXT PRIMARY KEY,
+                original_path TEXT NOT NULL,
+                trash_path TEXT NOT NULL,
+                deleted_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT 'general',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                sha256 TEXT NOT NULL DEFAULT '',
+                is_dir INTEGER NOT NULL DEFAULT 0,
+                auto_deleted INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_trash_expires
+                ON trash_manifest(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_trash_category
+                ON trash_manifest(category);
+        """)
+        _set_schema_version(conn, 13, "Add trash_manifest table for soft-delete recycle bin")
+        conn.commit()
+
 
 SCHEMA_SQL = f"""
 -- Memories table
@@ -838,6 +862,24 @@ CREATE TABLE IF NOT EXISTS telegram_bot_state (
     poll_offset INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL DEFAULT ''
 );
+
+-- Trash manifest (soft-delete recycle bin)
+CREATE TABLE IF NOT EXISTS trash_manifest (
+    id TEXT PRIMARY KEY,
+    original_path TEXT NOT NULL,
+    trash_path TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'general',
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    sha256 TEXT NOT NULL DEFAULT '',
+    is_dir INTEGER NOT NULL DEFAULT 0,
+    auto_deleted INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_trash_expires ON trash_manifest(expires_at);
+CREATE INDEX IF NOT EXISTS idx_trash_category ON trash_manifest(category);
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (

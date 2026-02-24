@@ -68,6 +68,15 @@ def temp_data_dir(monkeypatch, tmp_path):
     except ImportError:
         pass
 
+    # Trash paths
+    trash_dir = data_dir / "trash"
+    monkeypatch.setattr(config, "TRASH_DIR", trash_dir)
+    try:
+        import jaybrain.trash as trash_mod
+        monkeypatch.setattr(trash_mod, "TRASH_DIR", trash_dir)
+    except ImportError:
+        pass
+
     # Conversation archive paths
     monkeypatch.setattr(config, "CLAUDE_PROJECTS_DIR", tmp_path / "claude_projects")
 

@@ -3296,6 +3296,125 @@ def personality_config(
 
 
 # =============================================================================
+# Trash / Soft-Delete Recycle Bin
+# =============================================================================
+
+@mcp.tool()
+def trash_scan(auto_only: bool = False) -> str:
+    """Scan project directories for trashable files.
+
+    Returns two lists:
+    - 'auto': safe to auto-trash (gitignored garbage like __pycache__, .pyc, caches)
+    - 'review': suspicious files that need manual confirmation
+
+    auto_only: if True, only return auto-trashable items (skip review list).
+    """
+    from .trash import scan_files
+
+    try:
+        result = scan_files(
+            include_auto=True,
+            include_suspect=not auto_only,
+        )
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("trash_scan failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def trash_delete(filepath: str, reason: str = "") -> str:
+    """Move a file or directory to the trash (soft-delete).
+
+    The file is moved to data/trash/ with metadata tracking. It can be
+    restored within the retention period before permanent deletion.
+
+    Safety: refuses to trash git-tracked or protected files.
+    """
+    from .trash import trash_file
+
+    try:
+        result = trash_file(filepath, reason=reason)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("trash_delete failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def trash_auto_cleanup() -> str:
+    """Run the full auto-cleanup pipeline.
+
+    Scans all project directories and auto-trashes safe files (gitignored
+    bytecode, caches, build artifacts). Never touches git-tracked or
+    protected files.
+    """
+    from .trash import run_auto_cleanup
+
+    try:
+        result = run_auto_cleanup()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("trash_auto_cleanup failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def trash_restore(entry_id: str) -> str:
+    """Restore a trashed file to its original location.
+
+    entry_id: the trash manifest ID (from trash_list).
+    Verifies SHA-256 hash integrity before restoring.
+    """
+    from .trash import restore_file
+
+    try:
+        result = restore_file(entry_id)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("trash_restore failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def trash_list(category: str = "", limit: int = 50) -> str:
+    """List files currently in the trash.
+
+    category: filter by category (bytecode, cache, build_artifact, log, temp,
+              source, config, general). Empty string = all.
+    limit: max entries to return.
+    """
+    from .trash import list_trash
+
+    try:
+        result = list_trash(
+            category=category if category else None,
+            limit=limit,
+        )
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("trash_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def trash_sweep() -> str:
+    """Permanently delete expired trash entries.
+
+    Called automatically by the daemon daily, but can also be triggered
+    manually. Only deletes entries past their retention period.
+    """
+    from .trash import sweep_expired
+
+    try:
+        result = sweep_expired()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("trash_sweep failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Server entry point
 # =============================================================================
 

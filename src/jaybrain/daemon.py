@@ -493,4 +493,16 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register job_board_autofetch module", exc_info=True)
 
+    # Phase 6: Trash sweep (daily 3 AM -- permanently delete expired entries)
+    try:
+        from .trash import sweep_expired
+        dm.register_module(
+            "trash_sweep",
+            sweep_expired,
+            CronTrigger(hour=3, minute=0),
+            "Daily sweep of expired trash entries",
+        )
+    except Exception:
+        logger.error("Failed to register trash_sweep module", exc_info=True)
+
     return dm

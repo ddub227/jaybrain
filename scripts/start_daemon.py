@@ -41,8 +41,26 @@ def _is_pid_alive(pid: int) -> bool:
             return False
 
 
+def _load_env() -> None:
+    """Load .env file from project root if it exists."""
+    env_file = PROJECT_ROOT / ".env"
+    if not env_file.exists():
+        return
+    with open(env_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if not os.environ.get(key):
+                os.environ[key] = value
+
+
 def run_foreground() -> None:
     """Run the daemon in the foreground."""
+    _load_env()
     data_dir = PROJECT_ROOT / "data"
     log_file = data_dir / "daemon.log"
 

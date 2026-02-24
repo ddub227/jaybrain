@@ -191,17 +191,17 @@ def _parse_domains_doc(text: str) -> list[dict]:
 
     Handles both markdown (# headers, - bullets) and Google Docs plain text
     export format (bare "Domain N:" headers, numbered sub-goals, * bullets).
+
+    Section state machine:
+      "idle"      -- before any goal-producing section; bullets ignored
+      "sub_goals" -- inside Sub-goals: section; bullets/numbers -> sub-goals
+      "goals"     -- inside a markdown-only freeform section; bullets -> goals
     """
     domains = []
     current_domain = None
     current_goal = None
-    in_sub_goals = False
-    # Sections to skip when collecting description text
-    _skip_sections = {
-        "current status:", "decision tree:", "time allocation target:",
-        "key metrics:", "exam domains (sy0-701):", "dependencies:",
-        "subscription tracker:", "key dates:", "vision:",
-    }
+    # "idle" = skip bullets, "sub_goals" = capture sub-goals, "goals" = capture goals
+    section = "idle"
 
     for raw_line in text.replace("\r\n", "\n").split("\n"):
         if not raw_line.strip():
@@ -224,10 +224,9 @@ def _parse_domains_doc(text: str) -> list[dict]:
             continue
 
         # Domain header: markdown "## Domain..." or plain "Domain N: ..."
-        header_match = (
-            re.match(r'^#{1,2}\s+(?:Domain\s+\d+:\s*)?(.+)', line)
-            or re.match(r'^Domain\s+\d+:\s*(.+)', line)
-        )
+        md_header = re.match(r'^#{1,2}\s+(?:Domain\s+\d+:\s*)?(.+)', line)
+        plain_header = re.match(r'^Domain\s+\d+:\s*(.+)', line) if not md_header else None
+        header_match = md_header or plain_header
         if header_match:
             name = header_match.group(1).strip()
             # Skip meta-headers and non-domain sections
@@ -238,7 +237,7 @@ def _parse_domains_doc(text: str) -> list[dict]:
             )):
                 current_domain = None
                 current_goal = None
-                in_sub_goals = False
+                section = "idle"
                 continue
             current_domain = {
                 "name": name,
@@ -247,7 +246,9 @@ def _parse_domains_doc(text: str) -> list[dict]:
             }
             domains.append(current_domain)
             current_goal = None
-            in_sub_goals = False
+            # Markdown format: bullets are freeform goals
+            # Google Doc plain text: only Primary Goal/Sub-goals produce goals
+            section = "goals" if md_header else "idle"
             continue
 
         if not current_domain:
@@ -265,7 +266,7 @@ def _parse_domains_doc(text: str) -> list[dict]:
                 "sub_goals": [],
             }
             current_domain["goals"].append(current_goal)
-            in_sub_goals = False
+            section = "idle"
             continue
 
         # "Target Exam Date:" -> capture as target_date on current goal
@@ -274,33 +275,35 @@ def _parse_domains_doc(text: str) -> list[dict]:
             current_goal["target_date"] = td_match.group(1).strip()
             continue
 
-        # "Sub-goals:" section marker
+        # "Sub-goals:" section marker -> capture sub-goals
         if re.match(r'^(?:\*\*)?Sub-goals?:?\*?\*?\s*$', line, re.IGNORECASE):
-            in_sub_goals = True
+            section = "sub_goals"
             continue
 
-        # Section headers that end sub-goal collection
-        if line.lower().rstrip(":") + ":" in _skip_sections or re.match(
+        # Non-goal section headers -> stop capturing
+        if re.match(
             r'^(?:\*\*)?(?:Current Status|Decision Tree|Time Allocation|'
-            r'Key Metrics|Exam Domains|Dependencies|Subscription|Key Dates|Vision)',
+            r'Key Metrics|Exam Domains|Dependencies|Subscription|Key Dates|'
+            r'Vision|BLOCKED BY)',
             line, re.IGNORECASE,
         ):
-            in_sub_goals = False
+            section = "idle"
             continue
 
-        # Numbered sub-goal: "1. ..." or "1) ..."
+        # Numbered item: "1. ..." or "1) ..."
         num_match = re.match(r'^\d+[.)]\s+(.+)', line)
-        if num_match and in_sub_goals and current_goal:
+        if num_match and section == "sub_goals" and current_goal:
             current_goal["sub_goals"].append(num_match.group(1).strip())
             continue
 
-        # Bullet goal/sub-goal: "- text" or "* text"
+        # Bullet: "- text" or "* text"
         bullet_match = re.match(r'^[-*]\s+(.+)', line)
         if bullet_match:
             bullet_text = bullet_match.group(1).strip()
-            if in_sub_goals and current_goal:
+            if section == "sub_goals" and current_goal:
                 current_goal["sub_goals"].append(bullet_text)
-            elif not in_sub_goals and current_domain:
+            elif section == "goals" and current_domain:
+                # Markdown-format freeform goals (no "Primary Goal:" header)
                 date_match = re.search(r'\(by\s+(.+?)\)', bullet_text)
                 target_date = date_match.group(1) if date_match else None
                 current_goal = {
@@ -309,11 +312,11 @@ def _parse_domains_doc(text: str) -> list[dict]:
                     "sub_goals": [],
                 }
                 current_domain["goals"].append(current_goal)
-                in_sub_goals = False
+            # In "idle" section, bullets are ignored (status lines, metrics, etc.)
             continue
 
         # Description text for domain (before any goals are added)
-        if current_domain and not current_domain["goals"] and not in_sub_goals:
+        if current_domain and not current_domain["goals"] and section == "idle":
             if current_domain["description"]:
                 current_domain["description"] += " " + line
             else:

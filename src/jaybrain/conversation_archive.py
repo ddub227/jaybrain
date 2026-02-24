@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -230,12 +231,19 @@ def summarize_conversation(conversation: dict) -> str:
         f"{transcript}"
     )
 
+    claude_cmd = shutil.which("claude") or "claude"
+    # Strip Claude Code env vars so subprocess doesn't think it's nested
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith("CLAUDECODE") and not k.startswith("CLAUDE_CODE")
+    }
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt],
+            [claude_cmd, "-p", prompt],
             capture_output=True,
             text=True,
             timeout=60,
+            env=clean_env,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()[:1000]

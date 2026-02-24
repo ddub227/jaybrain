@@ -14,6 +14,17 @@ from jaybrain.gdocs import (
     _parse_table_row,
     create_google_doc,
     read_google_doc,
+    DocElement,
+    DocStructure,
+    parse_doc_structure,
+    build_replace_text_request,
+    build_insert_text_request,
+    build_delete_range_request,
+    build_update_text_style_request,
+    sort_requests_reverse,
+    get_doc_structure,
+    replace_text,
+    append_to_doc,
 )
 
 
@@ -191,3 +202,254 @@ class TestReadGoogleDoc:
         with patch("jaybrain.gdocs._get_credentials", return_value=None):
             with pytest.raises(RuntimeError, match="credentials"):
                 read_google_doc("fake-doc-id")
+
+
+# ---------------------------------------------------------------------------
+# Document structure parsing tests
+# ---------------------------------------------------------------------------
+
+SAMPLE_DOC_JSON = {
+    "documentId": "test-doc-123",
+    "title": "Test Document",
+    "body": {
+        "content": [
+            {
+                "startIndex": 1,
+                "endIndex": 16,
+                "paragraph": {
+                    "elements": [
+                        {"textRun": {"content": "Main Heading\n"}}
+                    ],
+                    "paragraphStyle": {"namedStyleType": "HEADING_1"},
+                },
+            },
+            {
+                "startIndex": 16,
+                "endIndex": 35,
+                "paragraph": {
+                    "elements": [
+                        {"textRun": {"content": "Some body text.\n"}}
+                    ],
+                    "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                },
+            },
+            {
+                "startIndex": 35,
+                "endIndex": 50,
+                "paragraph": {
+                    "elements": [
+                        {"textRun": {"content": "Sub Heading\n"}}
+                    ],
+                    "paragraphStyle": {"namedStyleType": "HEADING_2"},
+                },
+            },
+            {
+                "startIndex": 50,
+                "endIndex": 70,
+                "paragraph": {
+                    "elements": [
+                        {"textRun": {"content": "Sub body content.\n"}}
+                    ],
+                    "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                },
+            },
+            {
+                "startIndex": 70,
+                "endIndex": 90,
+                "paragraph": {
+                    "elements": [
+                        {"textRun": {"content": "Another Heading\n"}}
+                    ],
+                    "paragraphStyle": {"namedStyleType": "HEADING_1"},
+                },
+            },
+            {
+                "startIndex": 90,
+                "endIndex": 105,
+                "paragraph": {
+                    "elements": [
+                        {"textRun": {"content": "Final content\n"}}
+                    ],
+                    "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                },
+            },
+        ],
+    },
+}
+
+
+class TestParseDocStructure:
+    def test_parses_headings_and_paragraphs(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        headings = [e for e in structure.elements if e.kind == "heading"]
+        paragraphs = [e for e in structure.elements if e.kind == "paragraph"]
+        assert len(headings) == 3
+        assert len(paragraphs) == 3
+
+    def test_heading_levels(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        headings = structure.find_all_headings()
+        assert headings[0].heading_level == 1
+        assert headings[1].heading_level == 2
+        assert headings[2].heading_level == 1
+
+    def test_heading_text(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        h = structure.find_heading("Main Heading")
+        assert h is not None
+        assert "Main Heading" in h.text
+
+    def test_h1_section_boundary(self):
+        """H1 section extends until next H1."""
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        h1 = structure.find_heading("Main Heading")
+        assert h1 is not None
+        assert h1.section_end_index == 70  # stops at "Another Heading"
+
+    def test_h2_section_boundary(self):
+        """H2 section extends until next heading of same or higher level."""
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        h2 = structure.find_heading("Sub Heading")
+        assert h2 is not None
+        assert h2.section_end_index == 70  # stops at "Another Heading" (H1)
+
+    def test_last_heading_extends_to_doc_end(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        last = structure.find_heading("Another Heading")
+        assert last is not None
+        assert last.section_end_index == 105
+
+    def test_find_heading_substring(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        result = structure.find_heading("Main")
+        assert result is not None
+        assert result.heading_level == 1
+
+    def test_find_heading_case_insensitive(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        result = structure.find_heading("main heading")
+        assert result is not None
+
+    def test_find_heading_with_level_filter(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        # "Sub Heading" is H2, should not match when filtering for H1
+        result = structure.find_heading("Heading", level=2)
+        assert result is not None
+        assert result.heading_level == 2
+        assert "Sub" in result.text
+
+    def test_find_heading_not_found(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        result = structure.find_heading("Nonexistent")
+        assert result is None
+
+    def test_doc_end_index(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        assert structure.end_index == 105
+
+    def test_doc_id_and_title(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        assert structure.doc_id == "test-doc-123"
+        assert structure.title == "Test Document"
+
+    def test_empty_doc(self):
+        empty = {
+            "documentId": "empty",
+            "title": "Empty",
+            "body": {"content": []},
+        }
+        structure = parse_doc_structure(empty)
+        assert structure.elements == []
+        assert structure.end_index == 1
+
+    def test_find_all_headings_by_level(self):
+        structure = parse_doc_structure(SAMPLE_DOC_JSON)
+        h1s = structure.find_all_headings(level=1)
+        assert len(h1s) == 2
+        h2s = structure.find_all_headings(level=2)
+        assert len(h2s) == 1
+
+
+class TestRequestBuilders:
+    def test_replace_text_request(self):
+        req = build_replace_text_request("old", "new")
+        assert "replaceAllText" in req
+        assert req["replaceAllText"]["containsText"]["text"] == "old"
+        assert req["replaceAllText"]["replaceText"] == "new"
+
+    def test_insert_text_request(self):
+        req = build_insert_text_request(42, "hello")
+        assert req["insertText"]["location"]["index"] == 42
+        assert req["insertText"]["text"] == "hello"
+
+    def test_delete_range_request(self):
+        req = build_delete_range_request(10, 50)
+        rng = req["deleteContentRange"]["range"]
+        assert rng["startIndex"] == 10
+        assert rng["endIndex"] == 50
+
+    def test_style_request_bold(self):
+        req = build_update_text_style_request(5, 15, bold=True)
+        assert req["updateTextStyle"]["textStyle"]["bold"] is True
+        assert "bold" in req["updateTextStyle"]["fields"]
+
+    def test_style_request_multiple_fields(self):
+        req = build_update_text_style_request(0, 10, bold=True, italic=True, font_size=14.0)
+        style = req["updateTextStyle"]["textStyle"]
+        assert style["bold"] is True
+        assert style["italic"] is True
+        assert style["fontSize"]["magnitude"] == 14.0
+        fields = req["updateTextStyle"]["fields"]
+        assert "bold" in fields
+        assert "italic" in fields
+        assert "fontSize" in fields
+
+    def test_style_request_omits_none_fields(self):
+        req = build_update_text_style_request(0, 10, italic=True)
+        assert "bold" not in req["updateTextStyle"]["textStyle"]
+        assert "italic" in req["updateTextStyle"]["fields"]
+        assert "bold" not in req["updateTextStyle"]["fields"]
+
+    def test_sort_requests_reverse(self):
+        requests = [
+            build_insert_text_request(10, "a"),
+            build_insert_text_request(50, "b"),
+            build_insert_text_request(30, "c"),
+        ]
+        sorted_reqs = sort_requests_reverse(requests)
+        indexes = [r["insertText"]["location"]["index"] for r in sorted_reqs]
+        assert indexes == [50, 30, 10]
+
+    def test_sort_mixed_request_types(self):
+        requests = [
+            build_insert_text_request(10, "a"),
+            build_delete_range_request(60, 80),
+            build_replace_text_request("x", "y"),  # index 0 (no position)
+        ]
+        sorted_reqs = sort_requests_reverse(requests)
+        # delete (80) should come first, then insert (10), then replace (0)
+        assert "deleteContentRange" in sorted_reqs[0]
+        assert "insertText" in sorted_reqs[1]
+        assert "replaceAllText" in sorted_reqs[2]
+
+
+class TestEditAPINoCredentials:
+    """API functions handle missing credentials gracefully."""
+
+    def test_get_doc_structure_no_creds(self):
+        from unittest.mock import patch
+        with patch("jaybrain.gdocs._get_credentials", return_value=None):
+            with pytest.raises(RuntimeError, match="credentials"):
+                get_doc_structure("fake-id")
+
+    def test_replace_text_no_creds(self):
+        from unittest.mock import patch
+        with patch("jaybrain.gdocs._get_credentials", return_value=None):
+            result = replace_text("fake-id", "old", "new")
+            assert "error" in result
+
+    def test_append_no_creds(self):
+        from unittest.mock import patch
+        with patch("jaybrain.gdocs._get_credentials", return_value=None):
+            result = append_to_doc("fake-id", "text")
+            assert "error" in result

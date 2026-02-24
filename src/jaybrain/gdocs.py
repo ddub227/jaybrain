@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -672,3 +673,476 @@ def move_file_to_folder(
             file_id, folder_id, e, exc_info=True,
         )
         return {"error": f"Google Drive API error: {e}"}
+
+
+# ---------------------------------------------------------------------------
+# Google Docs editing -- document structure + batchUpdate operations
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DocElement:
+    """A parsed element from a Google Doc with character index positions."""
+
+    kind: str  # "heading", "paragraph", "list_item", "table"
+    text: str
+    start_index: int
+    end_index: int
+    heading_level: int = 0  # 1-6 for headings, 0 otherwise
+    section_end_index: int = 0  # end of heading's section
+
+
+@dataclass
+class DocStructure:
+    """Parsed document structure with heading/section lookup methods."""
+
+    doc_id: str
+    title: str
+    elements: list[DocElement] = field(default_factory=list)
+    end_index: int = 1
+
+    def find_heading(
+        self, text: str, level: int = 0
+    ) -> Optional[DocElement]:
+        """Find first heading matching text (case-insensitive substring).
+
+        Args:
+            text: Substring to match in heading text.
+            level: Optional heading level filter (1-6, 0 = any).
+        """
+        text_lower = text.lower()
+        for e in self.elements:
+            if e.kind != "heading":
+                continue
+            if level and e.heading_level != level:
+                continue
+            if text_lower in e.text.lower():
+                return e
+        return None
+
+    def find_all_headings(self, level: int = 0) -> list[DocElement]:
+        """Get all headings, optionally filtered by level."""
+        return [
+            e
+            for e in self.elements
+            if e.kind == "heading" and (not level or e.heading_level == level)
+        ]
+
+    def find_text(self, text: str) -> list[tuple[int, int]]:
+        """Find all occurrences of exact text, returning (start, end) pairs."""
+        full_text = "".join(e.text for e in self.elements)
+        results = []
+        start = 0
+        while True:
+            idx = full_text.find(text, start)
+            if idx == -1:
+                break
+            # Offset by document start index (usually 1)
+            doc_offset = self.elements[0].start_index if self.elements else 1
+            results.append((idx + doc_offset, idx + doc_offset + len(text)))
+            start = idx + 1
+        return results
+
+
+def parse_doc_structure(doc_json: dict) -> DocStructure:
+    """Parse a documents().get() response into DocStructure.
+
+    Walks the content array, extracting paragraphs with their styles
+    and character indexes. For headings, computes section_end_index by
+    scanning forward to the next same-or-higher-level heading.
+
+    Pure function -- no API calls.
+    """
+    elements: list[DocElement] = []
+    body_content = doc_json.get("body", {}).get("content", [])
+
+    if not body_content:
+        return DocStructure(
+            doc_id=doc_json.get("documentId", ""),
+            title=doc_json.get("title", ""),
+        )
+
+    for item in body_content:
+        start = item.get("startIndex", 0)
+        end = item.get("endIndex", start)
+
+        if "paragraph" in item:
+            para = item["paragraph"]
+            text = ""
+            for elem in para.get("elements", []):
+                if "textRun" in elem:
+                    text += elem["textRun"]["content"]
+
+            style = para.get("paragraphStyle", {})
+            named_style = style.get("namedStyleType", "NORMAL_TEXT")
+            heading_level = 0
+            kind = "paragraph"
+
+            if named_style.startswith("HEADING_"):
+                try:
+                    heading_level = int(named_style.split("_")[1])
+                    kind = "heading"
+                except (ValueError, IndexError):
+                    pass
+
+            elements.append(
+                DocElement(
+                    kind=kind,
+                    text=text,
+                    start_index=start,
+                    end_index=end,
+                    heading_level=heading_level,
+                    section_end_index=end,
+                )
+            )
+
+        elif "table" in item:
+            elements.append(
+                DocElement(
+                    kind="table",
+                    text="",
+                    start_index=start,
+                    end_index=end,
+                )
+            )
+
+    # Compute section_end_index for headings
+    doc_end = body_content[-1].get("endIndex", 1) if body_content else 1
+
+    for i, elem in enumerate(elements):
+        if elem.kind != "heading":
+            continue
+        section_end = doc_end
+        for j in range(i + 1, len(elements)):
+            if (
+                elements[j].kind == "heading"
+                and elements[j].heading_level <= elem.heading_level
+            ):
+                section_end = elements[j].start_index
+                break
+        elem.section_end_index = section_end
+
+    return DocStructure(
+        doc_id=doc_json.get("documentId", ""),
+        title=doc_json.get("title", ""),
+        elements=elements,
+        end_index=doc_end,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Request builders (pure functions)
+# ---------------------------------------------------------------------------
+
+
+def build_replace_text_request(find: str, replace: str) -> dict:
+    """Build a ReplaceAllTextRequest. No index math needed."""
+    return {
+        "replaceAllText": {
+            "containsText": {"text": find, "matchCase": True},
+            "replaceText": replace,
+        }
+    }
+
+
+def build_insert_text_request(index: int, text: str) -> dict:
+    """Build an InsertTextRequest at the given character index."""
+    return {
+        "insertText": {
+            "location": {"index": index},
+            "text": text,
+        }
+    }
+
+
+def build_delete_range_request(start_index: int, end_index: int) -> dict:
+    """Build a DeleteContentRangeRequest."""
+    return {
+        "deleteContentRange": {
+            "range": {
+                "startIndex": start_index,
+                "endIndex": end_index,
+            }
+        }
+    }
+
+
+def build_update_text_style_request(
+    start_index: int,
+    end_index: int,
+    bold: Optional[bool] = None,
+    italic: Optional[bool] = None,
+    font_size: Optional[float] = None,
+) -> dict:
+    """Build an UpdateTextStyleRequest for a range."""
+    style: dict = {}
+    fields: list[str] = []
+    if bold is not None:
+        style["bold"] = bold
+        fields.append("bold")
+    if italic is not None:
+        style["italic"] = italic
+        fields.append("italic")
+    if font_size is not None:
+        style["fontSize"] = {"magnitude": font_size, "unit": "PT"}
+        fields.append("fontSize")
+    return {
+        "updateTextStyle": {
+            "range": {"startIndex": start_index, "endIndex": end_index},
+            "textStyle": style,
+            "fields": ",".join(fields),
+        }
+    }
+
+
+def _get_request_max_index(request: dict) -> int:
+    """Extract the highest affected index from a batchUpdate request."""
+    if "replaceAllText" in request:
+        return 0  # replaceAllText handles its own indexes
+    if "insertText" in request:
+        return request["insertText"]["location"]["index"]
+    if "deleteContentRange" in request:
+        return request["deleteContentRange"]["range"]["endIndex"]
+    if "updateTextStyle" in request:
+        return request["updateTextStyle"]["range"]["endIndex"]
+    return 0
+
+
+def sort_requests_reverse(requests: list[dict]) -> list[dict]:
+    """Sort batchUpdate requests in reverse document order.
+
+    Prevents earlier operations from invalidating indexes of later ones.
+    """
+    return sorted(requests, key=_get_request_max_index, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Public editing API
+# ---------------------------------------------------------------------------
+
+
+def get_doc_structure(doc_id: str) -> DocStructure:
+    """Fetch a Google Doc and parse its structure.
+
+    Returns DocStructure with all elements and their character indexes.
+    """
+    creds = _get_credentials()
+    if creds is None:
+        raise RuntimeError("Google credentials not available")
+
+    docs_service = _get_docs_service(creds)
+    doc = docs_service.documents().get(documentId=doc_id).execute()
+    return parse_doc_structure(doc)
+
+
+def replace_text(doc_id: str, find: str, replace: str) -> dict:
+    """Replace all occurrences of text in a Google Doc.
+
+    Uses ReplaceAllTextRequest which handles its own index management.
+    """
+    creds = _get_credentials()
+    if creds is None:
+        return {"error": "Google credentials not available"}
+
+    try:
+        docs_service = _get_docs_service(creds)
+        result = docs_service.documents().batchUpdate(
+            documentId=doc_id,
+            body={"requests": [build_replace_text_request(find, replace)]},
+        ).execute()
+
+        changed = 0
+        for reply in result.get("replies", []):
+            changed += reply.get("replaceAllText", {}).get(
+                "occurrencesChanged", 0
+            )
+        return {"status": "ok", "occurrences_changed": changed}
+    except Exception as e:
+        logger.error("replace_text failed: %s", e)
+        return {"error": str(e)}
+
+
+def append_to_doc(doc_id: str, content: str) -> dict:
+    """Append text content to the end of a Google Doc."""
+    creds = _get_credentials()
+    if creds is None:
+        return {"error": "Google credentials not available"}
+
+    try:
+        structure = get_doc_structure(doc_id)
+        insert_at = structure.end_index - 1
+
+        if not content.startswith("\n"):
+            content = "\n" + content
+
+        docs_service = _get_docs_service(creds)
+        docs_service.documents().batchUpdate(
+            documentId=doc_id,
+            body={"requests": [build_insert_text_request(insert_at, content)]},
+        ).execute()
+
+        return {
+            "status": "ok",
+            "characters_inserted": len(content),
+        }
+    except Exception as e:
+        logger.error("append_to_doc failed: %s", e)
+        return {"error": str(e)}
+
+
+def insert_after_heading(
+    doc_id: str,
+    heading_text: str,
+    content: str,
+    heading_level: int = 0,
+) -> dict:
+    """Insert text content after a heading in a Google Doc.
+
+    Finds the heading by text (case-insensitive substring match), then
+    inserts content immediately after the heading paragraph.
+    """
+    creds = _get_credentials()
+    if creds is None:
+        return {"error": "Google credentials not available"}
+
+    try:
+        structure = get_doc_structure(doc_id)
+        heading = structure.find_heading(heading_text, heading_level)
+        if not heading:
+            return {
+                "status": "not_found",
+                "heading_found": False,
+                "message": f"No heading matching '{heading_text}' found",
+            }
+
+        insert_at = heading.end_index
+        if not content.endswith("\n"):
+            content += "\n"
+
+        docs_service = _get_docs_service(creds)
+        docs_service.documents().batchUpdate(
+            documentId=doc_id,
+            body={
+                "requests": [build_insert_text_request(insert_at, content)]
+            },
+        ).execute()
+
+        return {
+            "status": "ok",
+            "heading_found": True,
+            "heading_text": heading.text.strip(),
+            "characters_inserted": len(content),
+        }
+    except Exception as e:
+        logger.error("insert_after_heading failed: %s", e)
+        return {"error": str(e)}
+
+
+def replace_section(
+    doc_id: str,
+    heading_text: str,
+    new_content: str,
+    heading_level: int = 0,
+) -> dict:
+    """Replace the content under a heading (preserving the heading itself).
+
+    Finds the heading, deletes body content between it and the next
+    same-or-higher-level heading, then inserts new_content.
+    """
+    creds = _get_credentials()
+    if creds is None:
+        return {"error": "Google credentials not available"}
+
+    try:
+        structure = get_doc_structure(doc_id)
+        heading = structure.find_heading(heading_text, heading_level)
+        if not heading:
+            return {
+                "status": "not_found",
+                "heading_found": False,
+                "message": f"No heading matching '{heading_text}' found",
+            }
+
+        body_start = heading.end_index
+        body_end = heading.section_end_index
+
+        requests: list[dict] = []
+        chars_deleted = 0
+        if body_end > body_start:
+            requests.append(build_delete_range_request(body_start, body_end))
+            chars_deleted = body_end - body_start
+
+        if new_content:
+            if not new_content.endswith("\n"):
+                new_content += "\n"
+            requests.append(build_insert_text_request(body_start, new_content))
+
+        if requests:
+            docs_service = _get_docs_service(creds)
+            docs_service.documents().batchUpdate(
+                documentId=doc_id,
+                body={"requests": requests},
+            ).execute()
+
+        return {
+            "status": "ok",
+            "heading_found": True,
+            "heading_text": heading.text.strip(),
+            "characters_deleted": chars_deleted,
+            "characters_inserted": len(new_content) if new_content else 0,
+        }
+    except Exception as e:
+        logger.error("replace_section failed: %s", e)
+        return {"error": str(e)}
+
+
+def delete_section(
+    doc_id: str,
+    heading_text: str,
+    heading_level: int = 0,
+) -> dict:
+    """Delete a heading and all its content until the next same-level heading."""
+    creds = _get_credentials()
+    if creds is None:
+        return {"error": "Google credentials not available"}
+
+    try:
+        structure = get_doc_structure(doc_id)
+        heading = structure.find_heading(heading_text, heading_level)
+        if not heading:
+            return {
+                "status": "not_found",
+                "heading_found": False,
+                "message": f"No heading matching '{heading_text}' found",
+            }
+
+        delete_start = heading.start_index
+        delete_end = heading.section_end_index
+        chars_deleted = delete_end - delete_start
+
+        if chars_deleted <= 0:
+            return {
+                "status": "ok",
+                "heading_found": True,
+                "characters_deleted": 0,
+            }
+
+        docs_service = _get_docs_service(creds)
+        docs_service.documents().batchUpdate(
+            documentId=doc_id,
+            body={
+                "requests": [
+                    build_delete_range_request(delete_start, delete_end)
+                ]
+            },
+        ).execute()
+
+        return {
+            "status": "ok",
+            "heading_found": True,
+            "heading_text": heading.text.strip(),
+            "characters_deleted": chars_deleted,
+        }
+    except Exception as e:
+        logger.error("delete_section failed: %s", e)
+        return {"error": str(e)}

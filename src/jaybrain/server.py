@@ -1693,6 +1693,115 @@ def gdrive_move_to_folder(
         return json.dumps({"error": str(e)})
 
 
+@mcp.tool()
+def gdoc_read_structure(doc_id: str) -> str:
+    """Read a Google Doc's structure -- headings, sections, and their positions.
+
+    Returns a structured view of the document showing all headings with
+    their levels, text content, and character index ranges. Use this to
+    understand a doc's layout before editing.
+
+    Args:
+        doc_id: Google Doc ID (from the URL or stored config).
+
+    Returns headings list with text, level, start/end indexes, and section boundaries.
+    """
+    from .gdocs import get_doc_structure
+
+    try:
+        structure = get_doc_structure(doc_id)
+        headings = [
+            {
+                "text": e.text.strip(),
+                "level": e.heading_level,
+                "start_index": e.start_index,
+                "end_index": e.end_index,
+                "section_end_index": e.section_end_index,
+            }
+            for e in structure.elements
+            if e.kind == "heading"
+        ]
+        return json.dumps({
+            "doc_id": structure.doc_id,
+            "title": structure.title,
+            "total_characters": structure.end_index,
+            "headings": headings,
+        })
+    except Exception as e:
+        logger.error("gdoc_read_structure failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def gdoc_edit(
+    doc_id: str,
+    operation: str,
+    find: str = "",
+    replace: str = "",
+    heading: str = "",
+    heading_level: int = 0,
+    content: str = "",
+) -> str:
+    """Edit an existing Google Doc.
+
+    Supports these operations:
+    - "replace_text": Find and replace all occurrences. Requires find + replace.
+    - "insert_after_heading": Insert content after a heading. Requires heading + content.
+    - "replace_section": Replace all content under a heading (keeps heading). Requires heading + content.
+    - "append": Append content to end of document. Requires content.
+    - "delete_section": Delete a heading and its content. Requires heading.
+
+    Args:
+        doc_id: Google Doc ID.
+        operation: One of: replace_text, insert_after_heading, replace_section, append, delete_section.
+        find: Text to find (for replace_text).
+        replace: Replacement text (for replace_text).
+        heading: Heading text to target (substring match, for heading-based ops).
+        heading_level: Optional heading level filter (1-6, 0 = any).
+        content: Content to insert/replace (for insert/replace/append ops).
+
+    Returns operation result with status and details.
+    """
+    from .gdocs import (
+        replace_text as _replace_text,
+        insert_after_heading as _insert_after_heading,
+        replace_section as _replace_section,
+        append_to_doc as _append_to_doc,
+        delete_section as _delete_section,
+    )
+
+    try:
+        if operation == "replace_text":
+            if not find:
+                return json.dumps({"error": "find parameter required for replace_text"})
+            result = _replace_text(doc_id, find, replace)
+        elif operation == "insert_after_heading":
+            if not heading or not content:
+                return json.dumps({"error": "heading and content required"})
+            result = _insert_after_heading(doc_id, heading, content, heading_level)
+        elif operation == "replace_section":
+            if not heading or not content:
+                return json.dumps({"error": "heading and content required"})
+            result = _replace_section(doc_id, heading, content, heading_level)
+        elif operation == "append":
+            if not content:
+                return json.dumps({"error": "content required for append"})
+            result = _append_to_doc(doc_id, content)
+        elif operation == "delete_section":
+            if not heading:
+                return json.dumps({"error": "heading required for delete_section"})
+            result = _delete_section(doc_id, heading, heading_level)
+        else:
+            return json.dumps({
+                "error": f"Unknown operation: {operation}. "
+                "Use: replace_text, insert_after_heading, replace_section, append, delete_section"
+            })
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("gdoc_edit failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
 # =============================================================================
 # Cover Letter & Interview Tools (3)
 # =============================================================================

@@ -364,6 +364,28 @@ GramCracker is a persistent Telegram bot (`@GramCracker_bot`) that gives JJ mobi
 - Before writing any script that touches authentication, verify zero hardcoded secrets.
 - `.env` files with secrets must always be in `.gitignore`.
 
+## Pre-Commit Security Tooling
+
+Every commit runs through a multi-stage pre-commit hook (`.git/hooks/pre-commit`):
+
+1. **Gitleaks** -- prevents committing secrets, API keys, tokens
+2. **Bandit** -- Python security linter (SQL injection, shell injection, hardcoded passwords, insecure crypto, etc.)
+
+Config in `pyproject.toml` under `[tool.bandit]`. Rules that fire on legitimate patterns in this codebase (e.g., `B608` for internal SQL f-strings, `B110` for cleanup try/except/pass) are suppressed. Rules that catch genuinely dangerous new patterns (e.g., `shell=True`, hardcoded passwords, pickle deserialization) remain active.
+
+**Semgrep** is planned for when WSL or CI/CD is available (not supported on native Windows).
+
+## Build Queue: Adversarial Security Auditor
+
+**Status:** Planned (post-Security+ exam)
+
+A dedicated Claude Code session with an adversarial system prompt for periodic security and architecture review. The auditor session should:
+- Have a separate CLAUDE.md that contains NO context about JayBrain's purpose or design intent (only sees code, not rationale)
+- Be explicitly adversarial: "Assume every module has at least one vulnerability, one architectural weakness, and one unnecessary complexity"
+- Produce structured reports: SECURITY / ARCHITECTURE / COMPLEXITY / TECHNICAL DEBT
+- Run periodically at milestones, not continuously
+- Never write production code -- read-only analysis only
+
 ## Project Context
 
 JayBrain is a Python MCP server that extends Claude Code with persistent memory. The codebase lives at `C:\Users\Joshua\jaybrain\`. Architecture uses SQLite + sqlite-vec for hybrid search, ONNX Runtime for embeddings, and FastMCP for the server framework. All logging goes to stderr (stdout is MCP protocol).

@@ -30,6 +30,7 @@ stealth = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "bandit>=1.7",
 ]
 
 [build-system]
@@ -38,6 +39,20 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.bandit]
+exclude_dirs = ["tests", "scripts"]
+skips = [
+    "B101",  # assert usage (fine in non-production code)
+    "B110",  # try/except/pass (intentional cleanup blocks)
+    "B112",  # try/except/continue (intentional cleanup)
+    "B311",  # random.choice (not used for crypto)
+    "B404",  # subprocess import (needed for browser/daemon)
+    "B603",  # subprocess without shell=True (safe -- no user input)
+    "B607",  # partial executable path (system commands)
+    "B310",  # urllib.urlopen (only used for localhost/known API URLs)
+    "B608",  # SQL f-string construction (internal column names, not user input)
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

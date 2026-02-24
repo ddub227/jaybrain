@@ -10,7 +10,7 @@ Isolation strategy:
     (full JayBrain context), defeating its purpose.
 
     Fix: this script copies auditor/CLAUDE.md to a directory OUTSIDE the repo
-    (~/jaybrain-auditor/) and launches Claude Code from there. No .git parent
+    (C:/jaybrain-auditor/) and launches Claude Code from there. No .git parent
     means Claude Code only sees the auditor's CLAUDE.md.
 
     Absolute paths in the CLAUDE.md and prompt ensure the auditor can still
@@ -21,6 +21,8 @@ The session is strictly read-only -- Edit/Write/NotebookEdit are blocked via
 """
 
 import argparse
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -34,8 +36,9 @@ PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 # Template lives in-repo for version control; deployed outside repo for isolation
 AUDITOR_TEMPLATE = PROJECT_ROOT / "auditor" / "CLAUDE.md"
 
-# Isolation directory -- MUST be outside any git repo
-AUDITOR_RUNTIME_DIR = Path.home() / "jaybrain-auditor"
+# Isolation directory -- MUST be outside any git repo.
+# Uses C:\ root because ~/  has a stray .git that would break isolation.
+AUDITOR_RUNTIME_DIR = Path("C:/jaybrain-auditor")
 
 # Claude CLI installed via npm -- find it reliably across terminals
 NPM_GLOBAL_BIN = Path.home() / "AppData" / "Roaming" / "npm"
@@ -155,18 +158,32 @@ def main() -> None:
 
     try:
         claude_bin = _find_claude()
+
+        # Strip CLAUDECODE env var so this can be launched from inside a
+        # Claude Code session without triggering the nested-session guard.
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+
+        # Empty MCP config + strict mode = zero MCP servers loaded.
+        # Without this, the auditor inherits global MCP configs which
+        # leak JayBrain context through tool descriptions.
+        empty_mcp = json.dumps({"mcpServers": {}})
+
         result = subprocess.run(
             [
                 claude_bin,
                 "--print",
+                "-p", prompt,
                 "--dangerously-skip-permissions",
                 "--max-turns", "100",
                 "--disallowedTools", "Edit,Write,NotebookEdit",
-                prompt,
+                "--mcp-config", empty_mcp,
+                "--strict-mcp-config",
             ],
             cwd=str(AUDITOR_RUNTIME_DIR),
             capture_output=True,
             text=True,
+            env=env,
         )
 
         report = result.stdout

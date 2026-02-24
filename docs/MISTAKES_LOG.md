@@ -64,3 +64,21 @@ preventive measures.
 - **Prevention ideas:**
   - Commit messages should describe what was done, not claim outcomes that
     weren't verified
+
+### 004 -- Auditor MCP context leak missed until dry run
+- **Date:** 2026-02-24
+- **Tags:** `omission`, `architecture`, `verification`
+- **What happened:** After fixing CLAUDE.md isolation (moving runtime dir
+  outside the repo), a dry run revealed the auditor still knew exactly what
+  JayBrain was. Cause: Claude Code loads MCP servers from global settings
+  (~/.claude/settings.json), not per-project. The MCP tool descriptions
+  contained full context about JayBrain's purpose and capabilities.
+- **Root cause:** Focused narrowly on CLAUDE.md as the only context source.
+  Did not enumerate all channels through which Claude Code receives project
+  context (CLAUDE.md, MCP server descriptions, env vars, etc.).
+- **Impact:** Auditor would have known JayBrain's purpose, defeating the
+  "no assumptions of intent" principle. Caught by dry-run testing.
+- **Prevention ideas:**
+  - When isolating a Claude Code session, audit ALL context channels:
+    CLAUDE.md, MCP configs, env vars, global settings
+  - Always dry-run isolation claims with a "what do you know?" probe

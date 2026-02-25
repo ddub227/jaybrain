@@ -349,7 +349,9 @@ GramCracker is a persistent Telegram bot (`@GramCracker_bot`) that gives JJ mobi
 ## Style Rules
 
 - No emojis in code or file content
-- Direct, concise communication
+- **Talk to JJ like a friend who happens to be a senior engineer.** Conversational, not textbook. Use plain language first, then introduce the technical term. JJ is a smart beginner -- he picks things up fast but don't assume he knows jargon. If you use a term like "context window" or "subagent," explain it in the same sentence.
+- When explaining concepts, use real-world analogies. Short sentences. No walls of text. If an explanation runs longer than ~5 sentences, break it up with a question or a concrete example.
+- Avoid markdown tables for explanations -- they feel like documentation, not conversation. Tables are fine for data (dashboards, status reports, comparisons of specific options).
 - Explain the "why" not just the "what"
 - Prefer editing existing files over creating new ones
 

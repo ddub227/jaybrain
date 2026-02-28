@@ -292,28 +292,26 @@ def test_session_list_empty():
 def test_select_option_by_value():
     """Test selecting a dropdown option on a page with a <select> element."""
     from jaybrain.browser import (
-        launch_browser, evaluate_js, select_option, close_browser,
+        launch_browser, select_option, close_browser, _state,
     )
 
     try:
         launch_browser(headless=True)
-        # Create a test page with a dropdown
-        evaluate_js("""
-            document.body.innerHTML = `
-                <select id="color">
-                    <option value="r">Red</option>
-                    <option value="g">Green</option>
-                    <option value="b">Blue</option>
-                </select>
-            `;
+        # Use page.set_content directly (evaluate_js is restricted to safe allowlist)
+        _state["page"].set_content("""
+            <select id="color">
+                <option value="r">Red</option>
+                <option value="g">Green</option>
+                <option value="b">Blue</option>
+            </select>
         """)
         result = select_option(selector="#color", value="g")
         assert result["status"] == "selected"
         assert result["chosen"] == "g"
 
         # Verify the selection took effect
-        val = evaluate_js('document.querySelector("#color").value')
-        assert val["result"] == "g"
+        val = _state["page"].evaluate('document.querySelector("#color").value')
+        assert val == "g"
     finally:
         close_browser()
 
@@ -321,18 +319,16 @@ def test_select_option_by_value():
 def test_select_option_by_label():
     """Test selecting a dropdown by visible label text."""
     from jaybrain.browser import (
-        launch_browser, evaluate_js, select_option, close_browser,
+        launch_browser, select_option, close_browser, _state,
     )
 
     try:
         launch_browser(headless=True)
-        evaluate_js("""
-            document.body.innerHTML = `
-                <select id="fruit">
-                    <option value="a">Apple</option>
-                    <option value="b">Banana</option>
-                </select>
-            `;
+        _state["page"].set_content("""
+            <select id="fruit">
+                <option value="a">Apple</option>
+                <option value="b">Banana</option>
+            </select>
         """)
         result = select_option(selector="#fruit", label="Banana")
         assert result["status"] == "selected"

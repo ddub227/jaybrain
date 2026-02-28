@@ -35,7 +35,7 @@ The only exceptions:
   - Facts and knowledge → `remember(content, category="semantic")`
   - Processes/workflows → `remember(content, category="procedural")`
   - Events/experiences → `remember(content, category="episodic")`
-- **Recall** when past context is needed → `recall(query)`
+- **Recall** when past context is needed → `deep_recall(query)` (preferred) or `recall(query)` for memory-only search
 - **Track tasks** when JJ mentions action items → `task_create(title, ...)`
 - **Store knowledge** for reference material → `knowledge_store(title, content, ...)`
 - **Update profile** when learning new preferences → `profile_update(section, key, value)`
@@ -176,7 +176,7 @@ The knowledge graph tracks entities (people, projects, tools, skills, concepts) 
 - `graph_search(query)` — substring search on entity names.
 - `graph_list(entity_type)` — list all entities, optionally filtered by type.
 
-**When to use:** Use `graph_query()` when JJ asks about how things connect ("what tools does JayBrain use?", "what do I know about X?"). Build entities when new projects, tools, or skills are discussed.
+**When to use:** Use `deep_recall(query)` as the default search tool — it searches memories, knowledge, AND the graph in one call, following entity->memory links to surface results invisible to text search alone. Use `graph_query()` directly only when you need deeper traversal (depth > 1) or want to explore a specific entity's full neighborhood. Build entities when new projects, tools, or skills are discussed.
 
 ## Browser Automation
 

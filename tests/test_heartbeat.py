@@ -155,8 +155,11 @@ class TestSessionCrash:
         result = check_session_crash()
         assert result["triggered"] is False
 
-    def test_stalled_session_detected(self, temp_data_dir):
+    def test_stalled_session_detected(self, temp_data_dir, monkeypatch):
         _setup_db()
+        import jaybrain.config as config
+        monkeypatch.setattr(config, "HEARTBEAT_SESSION_CRASH_ENABLED", True)
+
         from jaybrain.heartbeat import check_session_crash
 
         conn = get_connection()

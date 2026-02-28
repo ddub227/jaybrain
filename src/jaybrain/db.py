@@ -580,6 +580,23 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         _set_schema_version(conn, 16, "Add file_deletion_log and git_shadow_log tables")
         conn.commit()
 
+    # --- Migration 17: Feedly article dedup tracking ---
+    if current < 17:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS feedly_articles (
+                feedly_id TEXT PRIMARY KEY,
+                knowledge_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT '',
+                published_at TEXT,
+                fetched_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_feedly_articles_fetched
+                ON feedly_articles(fetched_at);
+        """)
+        _set_schema_version(conn, 17, "Add feedly_articles dedup tracking table")
+        conn.commit()
+
 
 _SCHEMA_SQL_TEMPLATE = """
 -- Memories table

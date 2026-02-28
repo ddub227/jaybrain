@@ -723,6 +723,20 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register trash module", exc_info=True)
 
+    # Phase: Feedly AI Feed monitor (every N minutes)
+    try:
+        from .feedly import run_feedly_monitor
+        from .config import FEEDLY_POLL_INTERVAL_MINUTES
+
+        dm.register_module(
+            "feedly_monitor",
+            run_feedly_monitor,
+            IntervalTrigger(minutes=FEEDLY_POLL_INTERVAL_MINUTES),
+            "Poll Feedly AI Feed for new articles",
+        )
+    except Exception:
+        logger.error("Failed to register feedly_monitor module", exc_info=True)
+
     # Post-registration audit: log how many modules registered and warn if low
     expected_modules = {
         "conversation_archive", "daily_briefing", "life_domains_sync",
@@ -731,6 +745,7 @@ def build_daemon() -> DaemonManager:
         "goal_staleness", "time_allocation_weekly", "network_decay",
         "event_discovery", "job_board_autofetch", "vault_sync",
         "trash_auto_cleanup", "trash_sweep", "git_shadow",
+        "feedly_monitor",
     }
     registered = set(dm.modules)
     missing = expected_modules - registered

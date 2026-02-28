@@ -3362,6 +3362,74 @@ def event_list(status: str = "new", limit: int = 20) -> str:
 
 
 # =============================================================================
+# Feedly Feed Tools (3)
+# =============================================================================
+
+
+@mcp.tool()
+def feedly_fetch() -> str:
+    """Manually trigger a Feedly AI Feed poll.
+
+    Fetches new articles, deduplicates, stores to knowledge base,
+    and sends Telegram notification if new articles found.
+    Normally runs every 15 minutes via daemon.
+    """
+    from .feedly import run_feedly_monitor
+
+    try:
+        result = run_feedly_monitor()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("feedly_fetch failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def feedly_status() -> str:
+    """Check Feedly feed monitoring status.
+
+    Shows configuration state, total articles ingested, last fetch time,
+    and the 10 most recent articles.
+    """
+    from .feedly import get_feedly_status
+
+    try:
+        result = get_feedly_status()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("feedly_status failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def feedly_search(query: str, limit: int = 10) -> str:
+    """Search Feedly feed articles in the knowledge base.
+
+    Wrapper around knowledge_search filtered to category='feedly'.
+    Articles are also searchable via deep_recall.
+    """
+    from .knowledge import search_knowledge_entries
+
+    try:
+        results = search_knowledge_entries(query, category="feedly", limit=limit)
+        output = []
+        for r in results:
+            output.append({
+                "id": r.knowledge.id,
+                "title": r.knowledge.title,
+                "content": r.knowledge.content[:300],
+                "tags": r.knowledge.tags,
+                "source": r.knowledge.source,
+                "score": r.score,
+                "created_at": r.knowledge.created_at.isoformat(),
+            })
+        return json.dumps({"count": len(output), "results": output})
+    except Exception as e:
+        logger.error("feedly_search failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Personality Tools (1)
 # =============================================================================
 

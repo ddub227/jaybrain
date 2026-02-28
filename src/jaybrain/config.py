@@ -82,6 +82,16 @@ def _init_env_vars() -> None:
     LIFE_DOMAINS_DOC_ID = os.environ.get("LIFE_DOMAINS_DOC_ID", "")
     EVENTBRITE_API_KEY = os.environ.get("EVENTBRITE_API_KEY", "")
 
+    global FEEDLY_ACCESS_TOKEN, FEEDLY_STREAM_ID, FEEDLY_POLL_INTERVAL_MINUTES
+    FEEDLY_ACCESS_TOKEN = os.environ.get("FEEDLY_ACCESS_TOKEN", "")
+    FEEDLY_STREAM_ID = os.environ.get("FEEDLY_STREAM_ID", "")
+    try:
+        FEEDLY_POLL_INTERVAL_MINUTES = int(
+            os.environ.get("FEEDLY_POLL_INTERVAL_MINUTES", "15")
+        )
+    except (ValueError, TypeError):
+        FEEDLY_POLL_INTERVAL_MINUTES = 15
+
 
 DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = DATA_DIR / "jaybrain.db"
@@ -323,6 +333,14 @@ HEARTBEAT_FORGE_DUE_THRESHOLD = 5  # notify when this many concepts are due
 HEARTBEAT_APP_STALE_DAYS = 7  # flag apps sitting in "applied" this long
 HEARTBEAT_SESSION_CRASH_ENABLED = False  # stalled session Telegram alerts
 SECURITY_PLUS_EXAM_DATE = "2026-03-01"
+
+# --- Feedly AI Feed ---
+FEEDLY_ACCESS_TOKEN = ""  # nosec B105 -- empty default, real value from env
+FEEDLY_STREAM_ID = ""
+FEEDLY_POLL_INTERVAL_MINUTES = 15
+FEEDLY_API_BASE = "https://cloud.feedly.com/v3"
+FEEDLY_FETCH_COUNT = 20
+FEEDLY_NOTIFY_THRESHOLD = 1
 
 # --- Event Discovery ---
 EVENT_DISCOVERY_LOCATION = "Charlotte, NC"

@@ -74,6 +74,68 @@ def _insert_news_feed_article(conn, kid, url="https://example.com/article", sour
 
 
 # =============================================================================
+# Title Slugification
+# =============================================================================
+
+
+class TestSlugifyTitle:
+    def test_basic(self):
+        from jaybrain.signalforge import _slugify_title
+
+        assert _slugify_title("Claude Code Flaws Found") == "claude-code-flaws-found"
+
+    def test_special_chars(self):
+        from jaybrain.signalforge import _slugify_title
+
+        result = _slugify_title("What's New in AI — A Developer's Guide!")
+        assert result == "whats-new-in-ai-a-developers-guide"
+
+    def test_truncation(self):
+        from jaybrain.signalforge import _slugify_title
+
+        long_title = "This Is A Very Long Title " * 10
+        result = _slugify_title(long_title, max_len=30)
+        assert len(result) <= 30
+
+    def test_empty(self):
+        from jaybrain.signalforge import _slugify_title
+
+        assert _slugify_title("") == "untitled"
+
+
+# =============================================================================
+# Article Formatting
+# =============================================================================
+
+
+class TestFormatArticleText:
+    def test_adds_header(self):
+        from jaybrain.signalforge import _format_article_text
+
+        result = _format_article_text(
+            "Body text.", title="My Article", url="https://example.com",
+        )
+        assert "My Article" in result
+        assert "===" in result
+        assert "Source: https://example.com" in result
+        assert "Body text." in result
+
+    def test_paragraph_separation(self):
+        from jaybrain.signalforge import _format_article_text
+
+        text = "First paragraph.\nSecond paragraph.\nThird paragraph."
+        result = _format_article_text(text)
+        assert "First paragraph.\n\nSecond paragraph.\n\nThird paragraph." in result
+
+    def test_no_title_no_header(self):
+        from jaybrain.signalforge import _format_article_text
+
+        result = _format_article_text("Just body text.")
+        assert "===" not in result
+        assert "Just body text." in result
+
+
+# =============================================================================
 # Google News URL Resolution
 # =============================================================================
 
@@ -163,12 +225,19 @@ class TestArticleExtraction:
 
 
 class TestFileStorage:
-    def test_path_format(self):
+    def test_path_format_with_title(self):
         from jaybrain.signalforge import _article_path
 
         dt = datetime(2026, 2, 28, 12, 0, 0, tzinfo=timezone.utc)
-        path = _article_path("abc123", date=dt)
+        path = _article_path("Claude Code Flaws Found", "abc123", date=dt)
         assert "2026-02-28" in str(path)
+        assert "claude-code-flaws-found.txt" in str(path)
+
+    def test_path_format_empty_title_falls_back(self):
+        from jaybrain.signalforge import _article_path
+
+        dt = datetime(2026, 2, 28, 12, 0, 0, tzinfo=timezone.utc)
+        path = _article_path("", "abc123", date=dt)
         assert "abc123.txt" in str(path)
 
     def test_write_and_read(self, temp_data_dir):
@@ -182,7 +251,7 @@ class TestFileStorage:
         conn = get_connection()
         _insert_knowledge_row(conn, kid)
         insert_signalforge_article(conn, "sf1", kid)
-        path = _save_article_text(kid, text)
+        path = _save_article_text("Test Article", kid, text)
         update_signalforge_article(
             conn, "sf1",
             fetch_status="fetched",
@@ -264,8 +333,11 @@ class TestFetchSingle:
         with patch("jaybrain.signalforge.requests.get", return_value=mock_resp):
             with patch("trafilatura.extract", return_value="Article content here."):
                 with patch("jaybrain.signalforge._save_article_text") as mock_save:
-                    mock_save.return_value = Path("/data/articles/2026-02-28/kid1.txt")
-                    result = _fetch_single_article("kid1", "https://example.com/article")
+                    mock_save.return_value = Path("/data/articles/2026-02-28/test-article.txt")
+                    result = _fetch_single_article(
+                        "kid1", "https://example.com/article",
+                        title="Test Article",
+                    )
 
         assert result["status"] == "fetched"
         assert result["word_count"] == 3
@@ -432,7 +504,7 @@ class TestCleanup:
         _insert_knowledge_row(conn, kid)
 
         # Create a file
-        path = _save_article_text(kid, "Old article text.")
+        path = _save_article_text("Old Article", kid, "Old article text.")
         assert path.exists()
 
         # Insert signalforge row with past expiry
@@ -457,7 +529,7 @@ class TestCleanup:
         conn = _setup_db(temp_data_dir)
         kid = "cleanup_status"
         _insert_knowledge_row(conn, kid)
-        path = _save_article_text(kid, "Text.")
+        path = _save_article_text("Status Test", kid, "Text.")
         insert_signalforge_article(conn, "sf_exp2", kid)
         past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         update_signalforge_article(
@@ -482,7 +554,7 @@ class TestCleanup:
         conn = _setup_db(temp_data_dir)
         kid = "cleanup_dir"
         _insert_knowledge_row(conn, kid)
-        path = _save_article_text(kid, "Text.")
+        path = _save_article_text("Dir Test", kid, "Text.")
         date_dir = path.parent
         assert date_dir.exists()
 
@@ -523,7 +595,7 @@ class TestStatus:
         _insert_knowledge_row(conn, kid, title="Test Status Article")
         insert_signalforge_article(conn, "sf_stat", kid)
 
-        path = _save_article_text(kid, "Some article text content here.")
+        path = _save_article_text("Test Status Article", kid, "Some article text content here.")
         expires = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
         update_signalforge_article(
             conn, "sf_stat",

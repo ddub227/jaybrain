@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -116,24 +117,90 @@ def _extract_article_text(html: str, url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# File naming and formatting
+# ---------------------------------------------------------------------------
+
+
+def _slugify_title(title: str, max_len: int = 80) -> str:
+    """Convert an article title to a filesystem-safe slug.
+
+    'Claude Code flaws left AI tool wide open to hackers'
+    -> 'claude-code-flaws-left-ai-tool-wide-open-to-hackers'
+    """
+    slug = title.lower()
+    slug = re.sub(r"[''`]", "", slug)          # remove apostrophes
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)    # non-alphanumeric -> hyphen
+    slug = slug.strip("-")                      # trim leading/trailing hyphens
+    # Truncate at word boundary
+    if len(slug) > max_len:
+        slug = slug[:max_len].rsplit("-", 1)[0]
+    return slug or "untitled"
+
+
+def _format_article_text(text: str, title: str = "", url: str = "",
+                         source: str = "") -> str:
+    """Format extracted article text for human readability in Notepad.
+
+    Adds a metadata header and ensures paragraph breaks use blank lines.
+    """
+    lines = []
+
+    # Metadata header
+    if title:
+        lines.append(title)
+        lines.append("=" * min(len(title), 80))
+        lines.append("")
+    if url:
+        lines.append(f"Source: {url}")
+    if source:
+        lines.append(f"Feed: {source}")
+    if url or source:
+        fetched = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines.append(f"Fetched: {fetched}")
+        lines.append("")
+        lines.append("-" * 72)
+        lines.append("")
+
+    # Format body: ensure paragraph breaks are double-newline separated.
+    # Trafilatura already uses \n between paragraphs, but single newlines
+    # look like one continuous blob in Notepad. Convert to double newlines.
+    paragraphs = re.split(r"\n{2,}", text)
+    if len(paragraphs) <= 1:
+        # Single block — split on single newlines as paragraph boundaries
+        paragraphs = text.split("\n")
+
+    # Filter empties and rejoin with double newlines
+    body = "\n\n".join(p.strip() for p in paragraphs if p.strip())
+    lines.append(body)
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # File storage (Tier 1)
 # ---------------------------------------------------------------------------
 
 
-def _article_path(knowledge_id: str, date: Optional[datetime] = None) -> Path:
+def _article_path(title: str, knowledge_id: str,
+                  date: Optional[datetime] = None) -> Path:
     """Build the file path for an article's full text.
 
-    Format: data/articles/YYYY-MM-DD/{knowledge_id}.txt
+    Format: data/articles/YYYY-MM-DD/{slugified-title}.txt
+    Falls back to knowledge_id if title is empty.
     """
     if date is None:
         date = datetime.now(timezone.utc)
     date_str = date.strftime("%Y-%m-%d")
-    return SIGNALFORGE_ARTICLES_DIR / date_str / f"{knowledge_id}.txt"
+    if title:
+        filename = _slugify_title(title)
+    else:
+        filename = knowledge_id
+    return SIGNALFORGE_ARTICLES_DIR / date_str / f"{filename}.txt"
 
 
-def _save_article_text(knowledge_id: str, text: str) -> Path:
+def _save_article_text(title: str, knowledge_id: str, text: str) -> Path:
     """Write article text to disk and return the file path."""
-    path = _article_path(knowledge_id)
+    path = _article_path(title, knowledge_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
@@ -187,7 +254,8 @@ def _should_skip_url(url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _fetch_single_article(knowledge_id: str, url: str) -> dict:
+def _fetch_single_article(knowledge_id: str, url: str, title: str = "",
+                          source_name: str = "") -> dict:
     """Fetch and extract full text for a single article.
 
     Returns a dict with: status, word_count, char_count, content_path, error
@@ -227,7 +295,7 @@ def _fetch_single_article(knowledge_id: str, url: str) -> dict:
 
         if resp.status_code == 403:
             result["status"] = "failed"
-            result["error"] = f"Forbidden (403)"
+            result["error"] = "Forbidden (403)"
             return result
 
         if resp.status_code >= 400:
@@ -241,18 +309,23 @@ def _fetch_single_article(knowledge_id: str, url: str) -> dict:
         return result
 
     # Extract article text
-    text = _extract_article_text(html, resolved_url)
-    if not text:
+    raw_text = _extract_article_text(html, resolved_url)
+    if not raw_text:
         result["status"] = "failed"
         result["error"] = "No text extracted"
         return result
 
+    # Format for human readability
+    formatted = _format_article_text(
+        raw_text, title=title, url=resolved_url, source=source_name,
+    )
+
     # Save to disk
-    path = _save_article_text(knowledge_id, text)
+    path = _save_article_text(title, knowledge_id, formatted)
     result["status"] = "fetched"
     result["content_path"] = str(path)
-    result["word_count"] = len(text.split())
-    result["char_count"] = len(text)
+    result["word_count"] = len(raw_text.split())
+    result["char_count"] = len(raw_text)
 
     return result
 
@@ -318,11 +391,14 @@ def run_signalforge_fetch() -> dict:
         article_id = row["id"]
         knowledge_id = row["knowledge_id"]
 
-        # Look up the URL from news_feed_articles
+        # Look up URL, title, and source name from news_feed_articles
         conn = get_connection()
         try:
             nfa_row = conn.execute(
-                "SELECT url FROM news_feed_articles WHERE knowledge_id = ?",
+                """SELECT nfa.url, nfa.title, nfs.name as source_name
+                FROM news_feed_articles nfa
+                LEFT JOIN news_feed_sources nfs ON nfs.id = nfa.source_id
+                WHERE nfa.knowledge_id = ?""",
                 (knowledge_id,),
             ).fetchone()
         finally:
@@ -344,9 +420,13 @@ def run_signalforge_fetch() -> dict:
             continue
 
         url = nfa_row["url"]
+        title = nfa_row["title"] or ""
+        source_name = nfa_row["source_name"] or ""
 
         # Fetch
-        result = _fetch_single_article(knowledge_id, url)
+        result = _fetch_single_article(
+            knowledge_id, url, title=title, source_name=source_name,
+        )
 
         # Update DB
         now = now_iso()
@@ -429,9 +509,12 @@ def fetch_single(knowledge_id: str) -> dict:
                 "content_path": existing["content_path"],
             }
 
-        # Look up URL
+        # Look up URL, title, and source name
         nfa_row = conn.execute(
-            "SELECT url FROM news_feed_articles WHERE knowledge_id = ?",
+            """SELECT nfa.url, nfa.title, nfs.name as source_name
+            FROM news_feed_articles nfa
+            LEFT JOIN news_feed_sources nfs ON nfs.id = nfa.source_id
+            WHERE nfa.knowledge_id = ?""",
             (knowledge_id,),
         ).fetchone()
 
@@ -439,6 +522,8 @@ def fetch_single(knowledge_id: str) -> dict:
             return {"status": "error", "error": "No URL found for knowledge_id"}
 
         url = nfa_row["url"]
+        title = nfa_row["title"] or ""
+        source_name = nfa_row["source_name"] or ""
 
         # Create signalforge row if not exists
         if not existing:
@@ -450,7 +535,9 @@ def fetch_single(knowledge_id: str) -> dict:
         conn.close()
 
     # Fetch
-    result = _fetch_single_article(knowledge_id, url)
+    result = _fetch_single_article(
+        knowledge_id, url, title=title, source_name=source_name,
+    )
 
     # Update DB
     now = now_iso()

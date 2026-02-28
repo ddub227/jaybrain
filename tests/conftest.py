@@ -80,4 +80,27 @@ def temp_data_dir(monkeypatch, tmp_path):
     # Conversation archive paths
     monkeypatch.setattr(config, "CLAUDE_PROJECTS_DIR", tmp_path / "claude_projects")
 
+    # File watcher paths (isolated to tmp_path)
+    monkeypatch.setattr(config, "FILE_WATCHER_ENABLED", True)
+    monkeypatch.setattr(config, "FILE_WATCHER_PATHS", [str(tmp_path)])
+    monkeypatch.setattr(config, "FILE_WATCHER_IGNORE_PATTERNS", [])
+    try:
+        import jaybrain.file_watcher as fw_mod
+        monkeypatch.setattr(fw_mod, "DB_PATH", data_dir / "jaybrain.db")
+    except ImportError:
+        pass
+
+    # GitShadow paths (isolated to tmp_path)
+    monkeypatch.setattr(config, "GIT_SHADOW_ENABLED", True)
+    monkeypatch.setattr(config, "GIT_SHADOW_REPO_PATHS", [str(tmp_path / "test_repo")])
+    monkeypatch.setattr(config, "GIT_SHADOW_INTERVAL_SECONDS", 600)
+    try:
+        import jaybrain.git_shadow as gs_mod
+        monkeypatch.setattr(gs_mod, "DB_PATH", data_dir / "jaybrain.db")
+    except ImportError:
+        pass
+
+    # Vault paths (isolated to tmp_path)
+    monkeypatch.setattr(config, "VAULT_PATH", tmp_path / "vault")
+
     return data_dir

@@ -58,11 +58,112 @@ def _load_env() -> None:
                 os.environ[key] = value
 
 
+def _acquire_lock(lock_path: Path):
+    """Acquire an exclusive file lock to prevent dual-daemon startup.
+
+    Returns the open file handle (must stay open for lock to persist)
+    or None if another daemon holds the lock.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fh = open(lock_path, "w")
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fh.write(str(os.getpid()))
+        fh.flush()
+        return fh
+    except (OSError, IOError):
+        return None
+
+
+def _check_db_for_alive_daemon(data_dir: Path) -> int | None:
+    """Check if daemon_state in the DB has an alive PID.
+
+    Returns the alive PID if found, None otherwise.
+    """
+    import sqlite3
+
+    db_path = data_dir / "jaybrain.db"
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        row = conn.execute(
+            "SELECT pid FROM daemon_state WHERE id = 1 AND status = 'running'"
+        ).fetchone()
+        conn.close()
+        if row and row[0]:
+            pid = int(row[0])
+            if _is_pid_alive(pid):
+                return pid
+    except Exception:
+        pass
+    return None
+
+
+def _log_startup_refused(data_dir: Path, rival_pid: int) -> None:
+    """Best-effort log of startup_refused to daemon_lifecycle_log."""
+    import sqlite3
+    from datetime import datetime, timezone
+
+    db_path = data_dir / "jaybrain.db"
+    if not db_path.exists():
+        return
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.execute(
+            """INSERT INTO daemon_lifecycle_log
+            (event_type, pid, timestamp, trigger, error_message)
+            VALUES (?, ?, ?, ?, ?)""",
+            (
+                "startup_refused",
+                os.getpid(),
+                datetime.now(timezone.utc).isoformat(),
+                "manual",
+                f"Rival PID {rival_pid} is alive in daemon_state",
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def run_foreground() -> None:
     """Run the daemon in the foreground."""
     _load_env()
     data_dir = PROJECT_ROOT / "data"
     log_file = data_dir / "daemon.log"
+    lock_file = data_dir / "daemon.lock"
+
+    # Clean stale lock file if the PID inside it is dead
+    if lock_file.exists():
+        try:
+            stale_pid_text = lock_file.read_text().strip()
+            if stale_pid_text and stale_pid_text.isdigit():
+                stale_pid = int(stale_pid_text)
+                if not _is_pid_alive(stale_pid):
+                    lock_file.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
+
+    # Prevent dual-daemon startup via exclusive file lock
+    lock_handle = _acquire_lock(lock_file)
+    if lock_handle is None:
+        print("Another daemon instance holds the lock. Exiting.")
+        sys.exit(1)
+
+    # After acquiring lock, verify no alive daemon registered in DB
+    alive_pid = _check_db_for_alive_daemon(data_dir)
+    if alive_pid is not None:
+        print(f"Another daemon is running (pid={alive_pid} in daemon_state). Exiting.")
+        _log_startup_refused(data_dir, alive_pid)
+        lock_handle.close()
+        sys.exit(1)
 
     # On Windows background mode, stdout/stderr may be invalid handles.
     # Always log to file; also log to stderr if available.
@@ -84,6 +185,8 @@ def run_foreground() -> None:
         dm.start()
     except Exception:
         logging.exception("Daemon crashed with unhandled exception")
+    finally:
+        lock_handle.close()
 
 
 def run_daemon() -> None:
@@ -116,11 +219,45 @@ def run_daemon() -> None:
         _run_daemon_posix(pid_file, log_file)
 
 
+def _ensure_autostart_on_logon() -> None:
+    """Register JayBrain daemon to auto-start on user logon.
+
+    Uses HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run which
+    does not require admin privileges. The entry runs start_daemon.py
+    in foreground mode (Task Scheduler handles the current session,
+    this handles future logons).
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        script_path = str(Path(__file__).resolve())
+        cmd = f'"{sys.executable}" "{script_path}"'
+        result = subprocess.run(
+            [
+                "reg", "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v", "JayBrainDaemon",
+                "/t", "REG_SZ",
+                "/d", cmd,
+                "/f",
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print("  Auto-start on logon: registered")
+        else:
+            print(f"  Warning: could not register auto-start: {result.stderr.strip()}")
+    except Exception as e:
+        print(f"  Warning: could not register auto-start: {e}")
+
+
 def _fix_task_power_settings(task_name: str) -> None:
-    """Disable battery-related kill settings on the scheduled task.
+    """Harden the scheduled task: no battery kill, no time limit, auto-restart.
 
     By default, Task Scheduler sets StopIfGoingOnBatteries=True which
-    silently kills the daemon when the laptop unplugs. Fix via COM API.
+    silently kills the daemon when the laptop unplugs. Also adds restart-
+    on-failure (up to 3 retries at 1-minute intervals) so the daemon
+    recovers from crashes automatically. Fix via COM API.
     """
     try:
         import ctypes.wintypes  # noqa: F401 -- ensures COM is importable
@@ -130,9 +267,13 @@ def _fix_task_power_settings(task_name: str) -> None:
             "$ts.Connect(); "
             f"$t = $ts.GetFolder('\\').GetTask('{task_name}'); "
             "$d = $t.Definition; "
+            # Prevent battery/power kills
             "$d.Settings.DisallowStartIfOnBatteries = $false; "
             "$d.Settings.StopIfGoingOnBatteries = $false; "
             "$d.Settings.ExecutionTimeLimit = 'PT0S'; "
+            # Auto-restart on failure (up to 3 times, 1 min apart)
+            "$d.Settings.RestartCount = 3; "
+            "$d.Settings.RestartInterval = 'PT1M'; "
             f"$ts.GetFolder('\\').RegisterTaskDefinition('{task_name}', $d, 6, $null, $null, 3) | Out-Null"
         )
         result = subprocess.run(
@@ -140,7 +281,7 @@ def _fix_task_power_settings(task_name: str) -> None:
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0:
-            print("  Power settings: battery stop disabled, no time limit")
+            print("  Power settings: battery stop disabled, no time limit, restart-on-failure enabled")
         else:
             print(f"  Warning: could not fix power settings: {result.stderr.strip()}")
     except Exception as e:
@@ -179,6 +320,9 @@ def _run_daemon_windows(pid_file: Path, log_file: Path) -> None:
 
         # Fix default power settings that kill daemon on battery
         _fix_task_power_settings(task_name)
+
+        # Ensure daemon auto-starts on future logons (no admin needed)
+        _ensure_autostart_on_logon()
 
         # Run it now
         result = subprocess.run(

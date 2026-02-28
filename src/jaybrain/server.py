@@ -122,6 +122,28 @@ def recall(
 
 
 @mcp.tool()
+def deep_recall(query: str, limit: int = 10) -> str:
+    """Deep search across ALL of JayBrain's memory systems in one call.
+
+    Searches memories (with decay), knowledge base, AND the knowledge graph.
+    Follows entity->memory links to surface memories that wouldn't match
+    the text query alone. Returns structured sections: memories, knowledge,
+    graph entities + connections, and entity-linked memories.
+
+    Use this instead of calling recall + knowledge_search + graph_query
+    separately. All results are deduplicated across sections.
+    """
+    from .deep_recall import deep_recall as _deep_recall
+
+    try:
+        result = _deep_recall(query, limit)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("deep_recall failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
 def forget(memory_id: str) -> str:
     """Delete a specific memory by ID."""
     from .memory import forget as _forget
@@ -1040,12 +1062,12 @@ def forge_backup(local_only: bool = False) -> str:
     import sys
 
     try:
-        cmd = [sys.executable, "scripts/backup_forge.py"]
+        script = Path(__file__).resolve().parent.parent.parent / "scripts" / "backup_forge.py"
+        cmd = [sys.executable, str(script)]
         if local_only:
             cmd.append("--local-only")
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=120,
-            cwd=str(Path(__file__).parent.parent.parent),
         )
         if result.returncode == 0:
             return json.dumps({"status": "completed", "output": result.stdout[-500:]})
@@ -2804,16 +2826,17 @@ async def browser_hover(
 # =============================================================================
 
 @mcp.tool()
-async def browser_evaluate(expression: str) -> str:
-    """Evaluate a JavaScript expression in the page context.
+async def browser_evaluate(name: str) -> str:
+    """Evaluate a named JavaScript expression from the safe allowlist.
 
-    Returns the result as a string. Useful for reading page state,
-    extracting data, or manipulating the DOM.
+    Allowed names: title, url, text, html, ready_state, scroll_y,
+    scroll_height, viewport_height, selected_text, forms_count,
+    links_count, cookies_enabled.
     """
     from .browser import evaluate_js
 
     try:
-        result = await _run_browser(evaluate_js, expression)
+        result = await _run_browser(evaluate_js, name)
         return json.dumps(result)
     except Exception as e:
         logger.error("browser_evaluate failed: %s", e, exc_info=True)
@@ -3008,6 +3031,83 @@ def daemon_control(action: str) -> str:
         return json.dumps(result)
     except Exception as e:
         logger.error("daemon_control failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# File Watcher Tools (1)
+# =============================================================================
+
+
+@mcp.tool()
+def file_deletions(
+    path: str | None = None,
+    since: str | None = None,
+    limit: int = 20,
+) -> str:
+    """Query the file deletion log.
+
+    path: Optional substring filter on file path.
+    since: Optional ISO timestamp to filter (e.g. '2026-02-27').
+    limit: Max results (default 20).
+    """
+    from .file_watcher import query_deletions
+
+    try:
+        results = query_deletions(path=path, since=since, limit=limit)
+        return json.dumps({"deletions": results, "count": len(results)})
+    except Exception as e:
+        logger.error("file_deletions failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
+# GitShadow Tools (2)
+# =============================================================================
+
+
+@mcp.tool()
+def git_shadow_history(
+    repo: str | None = None,
+    file: str | None = None,
+    since: str | None = None,
+    limit: int = 20,
+) -> str:
+    """Query git working tree snapshot history.
+
+    repo: Optional repo path substring filter.
+    file: Optional filename substring filter.
+    since: Optional ISO timestamp cutoff.
+    limit: Max results (default 20).
+    """
+    from .git_shadow import query_shadow_history
+
+    try:
+        results = query_shadow_history(
+            repo=repo, file=file, since=since, limit=limit
+        )
+        return json.dumps({"shadows": results, "count": len(results)})
+    except Exception as e:
+        logger.error("git_shadow_history failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def git_shadow_restore(shadow_id: str, file_path: str) -> str:
+    """Extract a specific file version from a git shadow snapshot.
+
+    shadow_id: The ID from git_shadow_history results.
+    file_path: Relative file path within the repo (e.g. 'src/main.py').
+
+    Returns the file content at that snapshot point.
+    """
+    from .git_shadow import restore_file
+
+    try:
+        result = restore_file(shadow_id, file_path)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("git_shadow_restore failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
 
 
@@ -3415,11 +3515,124 @@ def trash_sweep() -> str:
 
 
 # =============================================================================
+# CramForge - Exam cram tools
+# =============================================================================
+
+
+@mcp.tool()
+def cram_add(
+    topic: str,
+    description: str = "",
+    source_question: str = "",
+    source_answer: str = "",
+) -> str:
+    """Add a cram topic for exam prep. Auto-links to SynapseForge if a match exists.
+
+    topic: The core concept name (e.g. "Kerberos", "RADIUS vs TACACS+").
+    description: What needs to be known about this topic.
+    source_question: The original wrong practice exam question (if from a pasted question).
+    source_answer: The correct answer from the practice exam.
+    """
+    from .cram import add_topic
+
+    try:
+        result = add_topic(topic, description, source_question, source_answer)
+        return json.dumps({"status": "added", **result})
+    except Exception as e:
+        logger.error("cram_add failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def cram_list(sort_by: str = "understanding") -> str:
+    """List all cram topics with understanding levels.
+
+    sort_by: understanding (weakest first), recent, topic (alphabetical), reviews.
+    """
+    from .cram import list_topics
+
+    try:
+        result = list_topics(sort_by)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("cram_list failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def cram_study(limit: int = 10) -> str:
+    """Get prioritized cram study queue (weakest understanding first).
+
+    Includes SynapseForge cross-reference data when available.
+    """
+    from .cram import get_study_queue
+
+    try:
+        result = get_study_queue(limit)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("cram_study failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def cram_review(
+    topic_id: str,
+    was_correct: bool,
+    confidence: int = 3,
+    notes: str = "",
+) -> str:
+    """Record a cram quiz answer. Uses SynapseForge v2 confidence-weighted scoring.
+
+    topic_id: The cram topic ID.
+    was_correct: Whether the answer was correct.
+    confidence: 1-5 (1=no idea, 5=certain).
+    notes: Optional notes about the misconception or insight.
+    """
+    from .cram import record_review
+
+    try:
+        result = record_review(topic_id, was_correct, confidence, notes)
+        return json.dumps({"status": "reviewed", **result})
+    except Exception as e:
+        logger.error("cram_review failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def cram_remove(topic_id: str) -> str:
+    """Remove a cram topic (graduated or added by mistake)."""
+    from .cram import remove_topic
+
+    try:
+        result = remove_topic(topic_id)
+        return json.dumps({"status": "removed", **result})
+    except Exception as e:
+        logger.error("cram_remove failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def cram_stats() -> str:
+    """Get cram dashboard: topic counts, accuracy, understanding distribution."""
+    from .cram import get_stats
+
+    try:
+        result = get_stats()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("cram_stats failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Server entry point
 # =============================================================================
 
 def main():
     """Run the MCP server."""
+    from .config import init
+    init()
     logger.info("JayBrain MCP server starting...")
     mcp.run(transport="stdio")
 

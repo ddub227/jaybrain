@@ -13,6 +13,61 @@ import sqlite_vec
 
 from .config import DB_PATH, EMBEDDING_DIM, ensure_data_dirs
 
+# Column allowlists for each updatable table (excludes id, created_at).
+_UPDATABLE_COLUMNS: dict[str, frozenset[str]] = {
+    "tasks": frozenset({
+        "title", "description", "status", "priority", "project",
+        "tags", "due_date", "updated_at",
+    }),
+    "knowledge": frozenset({
+        "title", "content", "category", "tags", "source", "updated_at",
+    }),
+    "forge_concepts": frozenset({
+        "term", "definition", "category", "difficulty", "tags",
+        "related_jaybrain_component", "source", "notes", "mastery_level",
+        "review_count", "correct_count", "last_reviewed", "next_review",
+        "subject_id", "bloom_level", "updated_at",
+    }),
+    "job_boards": frozenset({
+        "name", "url", "board_type", "tags", "active",
+        "last_checked", "content_hash", "updated_at",
+    }),
+    "applications": frozenset({
+        "job_id", "status", "resume_path", "cover_letter_path",
+        "applied_date", "notes", "tags", "updated_at",
+    }),
+    "graph_entities": frozenset({
+        "name", "entity_type", "description", "aliases",
+        "memory_ids", "properties", "updated_at",
+    }),
+    "graph_relationships": frozenset({
+        "source_entity_id", "target_entity_id", "rel_type", "weight",
+        "evidence_ids", "properties", "updated_at",
+    }),
+    "telegram_bot_state": frozenset({
+        "pid", "started_at", "last_heartbeat", "messages_in",
+        "messages_out", "poll_offset", "last_error",
+    }),
+    "cram_topics": frozenset({
+        "topic", "description", "source_question", "source_answer",
+        "understanding", "review_count", "correct_count",
+        "forge_concept_id", "last_reviewed", "updated_at",
+    }),
+}
+
+
+def _validate_fields(table: str, fields: dict) -> None:
+    """Raise ValueError if any field key is not in the table's column allowlist."""
+    allowed = _UPDATABLE_COLUMNS.get(table)
+    if allowed is None:
+        raise ValueError(f"No column allowlist defined for table '{table}'")
+    bad = set(fields.keys()) - allowed
+    if bad:
+        raise ValueError(
+            f"Invalid column(s) for {table}: {sorted(bad)}. "
+            f"Allowed: {sorted(allowed)}"
+        )
+
 
 def _serialize_f32(vector: list[float]) -> bytes:
     """Serialize a list of floats into bytes for sqlite-vec."""
@@ -23,6 +78,21 @@ def _deserialize_f32(data: bytes) -> list[float]:
     """Deserialize bytes back into a list of floats."""
     n = len(data) // 4
     return list(struct.unpack(f"{n}f", data))
+
+
+def fts5_safe_query(query: str) -> str:
+    """Convert a natural language query into a safe FTS5 query.
+
+    Wraps individual words in quotes to avoid FTS5 syntax errors from
+    special characters like AND, OR, NOT, -, etc.
+    """
+    words = query.split()
+    safe_words = []
+    for word in words:
+        cleaned = "".join(c for c in word if c.isalnum() or c == "_")
+        if cleaned:
+            safe_words.append(f'"{cleaned}"')
+    return " ".join(safe_words)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -385,8 +455,133 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         _set_schema_version(conn, 13, "Add trash_manifest table for soft-delete recycle bin")
         conn.commit()
 
+    # --- Migration 14: Cram topics and reviews tables ---
+    if current < 14:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS cram_topics (
+                id TEXT PRIMARY KEY,
+                topic TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                source_question TEXT NOT NULL DEFAULT '',
+                source_answer TEXT NOT NULL DEFAULT '',
+                understanding REAL NOT NULL DEFAULT 0.0,
+                review_count INTEGER NOT NULL DEFAULT 0,
+                correct_count INTEGER NOT NULL DEFAULT 0,
+                forge_concept_id TEXT,
+                last_reviewed TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (forge_concept_id) REFERENCES forge_concepts(id)
+                    ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cram_topics_understanding
+                ON cram_topics(understanding);
+            CREATE INDEX IF NOT EXISTS idx_cram_topics_forge_link
+                ON cram_topics(forge_concept_id);
 
-SCHEMA_SQL = f"""
+            CREATE TABLE IF NOT EXISTS cram_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic_id TEXT NOT NULL,
+                was_correct INTEGER NOT NULL,
+                confidence INTEGER NOT NULL DEFAULT 3,
+                notes TEXT NOT NULL DEFAULT '',
+                reviewed_at TEXT NOT NULL,
+                FOREIGN KEY (topic_id) REFERENCES cram_topics(id)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_cram_reviews_topic
+                ON cram_reviews(topic_id);
+            CREATE INDEX IF NOT EXISTS idx_cram_reviews_date
+                ON cram_reviews(reviewed_at);
+        """)
+        _set_schema_version(conn, 14, "Add cram_topics and cram_reviews tables")
+        conn.commit()
+
+    # --- Migration 15: Full daemon instrumentation (Mistakes #011-#015) ---
+    if current < 15:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS daemon_execution_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                module_name TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL DEFAULT 'running',
+                result_summary TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                telegram_sent INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_daemon_exec_module
+                ON daemon_execution_log(module_name);
+            CREATE INDEX IF NOT EXISTS idx_daemon_exec_date
+                ON daemon_execution_log(started_at);
+
+            CREATE TABLE IF NOT EXISTS daemon_lifecycle_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                pid INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                modules_registered TEXT NOT NULL DEFAULT '[]',
+                trigger TEXT NOT NULL DEFAULT 'manual',
+                error_message TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_daemon_lifecycle_date
+                ON daemon_lifecycle_log(timestamp);
+
+            CREATE TABLE IF NOT EXISTS telegram_send_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                caller TEXT NOT NULL DEFAULT 'unknown',
+                chat_id TEXT NOT NULL DEFAULT '',
+                message_preview TEXT NOT NULL DEFAULT '',
+                chunks_sent INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'unknown',
+                error_message TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_telegram_send_date
+                ON telegram_send_log(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_telegram_send_caller
+                ON telegram_send_log(caller);
+        """)
+        _set_schema_version(conn, 15, "Add daemon execution, lifecycle, and telegram send logs")
+        conn.commit()
+
+    # --- Migration 16: File deletion log + git shadow log ---
+    if current < 16:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS file_deletion_log (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT 'file_deleted',
+                file_size INTEGER,
+                source_context TEXT NOT NULL DEFAULT '',
+                pid INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_file_deletion_timestamp
+                ON file_deletion_log(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_file_deletion_path
+                ON file_deletion_log(file_path);
+
+            CREATE TABLE IF NOT EXISTS git_shadow_log (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                stash_hash TEXT NOT NULL,
+                changed_files TEXT NOT NULL DEFAULT '[]',
+                repo_path TEXT NOT NULL,
+                branch TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_git_shadow_timestamp
+                ON git_shadow_log(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_git_shadow_repo
+                ON git_shadow_log(repo_path);
+        """)
+        _set_schema_version(conn, 16, "Add file_deletion_log and git_shadow_log tables")
+        conn.commit()
+
+
+_SCHEMA_SQL_TEMPLATE = """
 -- Memories table
 CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
@@ -436,7 +631,7 @@ END;
 -- Memories vector table for semantic search
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0(
     id TEXT PRIMARY KEY,
-    embedding float[{EMBEDDING_DIM}]
+    embedding float[__EMBEDDING_DIM__]
 );
 
 -- Tasks table
@@ -513,7 +708,7 @@ END;
 -- Knowledge vector table
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_vec USING vec0(
     id TEXT PRIMARY KEY,
-    embedding float[{EMBEDDING_DIM}]
+    embedding float[__EMBEDDING_DIM__]
 );
 
 -- SynapseForge: Concepts table
@@ -575,7 +770,7 @@ END;
 -- SynapseForge: Concepts vector table
 CREATE VIRTUAL TABLE IF NOT EXISTS forge_concepts_vec USING vec0(
     id TEXT PRIMARY KEY,
-    embedding float[{EMBEDDING_DIM}]
+    embedding float[__EMBEDDING_DIM__]
 );
 
 -- SynapseForge: Reviews table
@@ -889,6 +1084,8 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
+SCHEMA_SQL = _SCHEMA_SQL_TEMPLATE.replace("__EMBEDDING_DIM__", str(EMBEDDING_DIM))
+
 
 # --- CRUD Helpers ---
 
@@ -948,7 +1145,7 @@ def get_memories_batch(
         return {}
     placeholders = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"SELECT * FROM memories WHERE id IN ({placeholders})", ids
+        f"SELECT * FROM memories WHERE id IN ({placeholders})", ids  # nosec B608
     ).fetchall()
     return {row["id"]: row for row in rows}
 
@@ -1038,13 +1235,14 @@ def update_task(conn: sqlite3.Connection, task_id: str, **fields) -> bool:
     """Update task fields. Returns True if found."""
     if not fields:
         return False
+    _validate_fields("tasks", fields)
     if "tags" in fields:
         fields["tags"] = json.dumps(fields["tags"])
     fields["updated_at"] = now_iso()
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [task_id]
     cursor = conn.execute(
-        f"UPDATE tasks SET {set_clause} WHERE id = ?", values
+        f"UPDATE tasks SET {set_clause} WHERE id = ?", values  # nosec B608
     )
     conn.commit()
     return cursor.rowcount > 0
@@ -1075,7 +1273,7 @@ def list_tasks(
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     params.append(limit)
     return conn.execute(
-        f"SELECT * FROM tasks {where} ORDER BY created_at DESC LIMIT ?", params
+        f"SELECT * FROM tasks {where} ORDER BY created_at DESC LIMIT ?", params  # nosec B608
     ).fetchall()
 
 
@@ -1185,13 +1383,14 @@ def insert_knowledge(
 def update_knowledge(conn: sqlite3.Connection, knowledge_id: str, **fields) -> bool:
     if not fields:
         return False
+    _validate_fields("knowledge", fields)
     if "tags" in fields:
         fields["tags"] = json.dumps(fields["tags"])
     fields["updated_at"] = now_iso()
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [knowledge_id]
     cursor = conn.execute(
-        f"UPDATE knowledge SET {set_clause} WHERE id = ?", values
+        f"UPDATE knowledge SET {set_clause} WHERE id = ?", values  # nosec B608
     )
     conn.commit()
     return cursor.rowcount > 0
@@ -1309,13 +1508,14 @@ def update_forge_concept(
     """Update concept fields. Returns True if found."""
     if not fields:
         return False
+    _validate_fields("forge_concepts", fields)
     if "tags" in fields:
         fields["tags"] = json.dumps(fields["tags"])
     fields["updated_at"] = now_iso()
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [concept_id]
     cursor = conn.execute(
-        f"UPDATE forge_concepts SET {set_clause} WHERE id = ?", values
+        f"UPDATE forge_concepts SET {set_clause} WHERE id = ?", values  # nosec B608
     )
     if commit:
         conn.commit()
@@ -1657,7 +1857,7 @@ def get_error_patterns(
     return conn.execute(
         f"""SELECT ep.* FROM forge_error_patterns ep
         {where}
-        ORDER BY ep.created_at DESC LIMIT ?""",
+        ORDER BY ep.created_at DESC LIMIT ?""",  # nosec B608
         params,
     ).fetchall()
 
@@ -1715,13 +1915,14 @@ def list_job_boards(
 def update_job_board(conn: sqlite3.Connection, board_id: str, **fields) -> bool:
     if not fields:
         return False
+    _validate_fields("job_boards", fields)
     if "tags" in fields:
         fields["tags"] = json.dumps(fields["tags"])
     fields["updated_at"] = now_iso()
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [board_id]
     cursor = conn.execute(
-        f"UPDATE job_boards SET {set_clause} WHERE id = ?", values
+        f"UPDATE job_boards SET {set_clause} WHERE id = ?", values  # nosec B608
     )
     conn.commit()
     return cursor.rowcount > 0
@@ -1799,7 +2000,7 @@ def list_job_postings(
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     params.append(limit)
     return conn.execute(
-        f"SELECT * FROM job_postings {where} ORDER BY created_at DESC LIMIT ?", params
+        f"SELECT * FROM job_postings {where} ORDER BY created_at DESC LIMIT ?", params  # nosec B608
     ).fetchall()
 
 
@@ -1831,13 +2032,14 @@ def get_application(conn: sqlite3.Connection, app_id: str) -> Optional[sqlite3.R
 def update_application(conn: sqlite3.Connection, app_id: str, **fields) -> bool:
     if not fields:
         return False
+    _validate_fields("applications", fields)
     if "tags" in fields:
         fields["tags"] = json.dumps(fields["tags"])
     fields["updated_at"] = now_iso()
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [app_id]
     cursor = conn.execute(
-        f"UPDATE applications SET {set_clause} WHERE id = ?", values
+        f"UPDATE applications SET {set_clause} WHERE id = ?", values  # nosec B608
     )
     conn.commit()
     return cursor.rowcount > 0
@@ -1967,7 +2169,7 @@ def get_all_memory_embeddings(
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     rows = conn.execute(
-        f"SELECT mv.id, mv.embedding FROM memories_vec mv {joins} {where}",
+        f"SELECT mv.id, mv.embedding FROM memories_vec mv {joins} {where}",  # nosec B608
         params,
     ).fetchall()
     return [(row[0], row[1]) for row in rows]
@@ -2038,6 +2240,7 @@ def insert_graph_entity(
 def update_graph_entity(conn: sqlite3.Connection, entity_id: str, **fields) -> bool:
     if not fields:
         return False
+    _validate_fields("graph_entities", fields)
     for json_field in ("aliases", "memory_ids", "properties"):
         if json_field in fields:
             fields[json_field] = json.dumps(fields[json_field])
@@ -2045,7 +2248,7 @@ def update_graph_entity(conn: sqlite3.Connection, entity_id: str, **fields) -> b
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [entity_id]
     cursor = conn.execute(
-        f"UPDATE graph_entities SET {set_clause} WHERE id = ?", values
+        f"UPDATE graph_entities SET {set_clause} WHERE id = ?", values  # nosec B608
     )
     conn.commit()
     return cursor.rowcount > 0
@@ -2088,7 +2291,7 @@ def search_graph_entities(
     where = "WHERE " + " AND ".join(conditions)
     params.append(limit)
     return conn.execute(
-        f"SELECT * FROM graph_entities {where} ORDER BY updated_at DESC LIMIT ?",
+        f"SELECT * FROM graph_entities {where} ORDER BY updated_at DESC LIMIT ?",  # nosec B608
         params,
     ).fetchall()
 
@@ -2142,6 +2345,7 @@ def insert_graph_relationship(
 def update_graph_relationship(conn: sqlite3.Connection, rel_id: str, **fields) -> bool:
     if not fields:
         return False
+    _validate_fields("graph_relationships", fields)
     for json_field in ("evidence_ids", "properties"):
         if json_field in fields:
             fields[json_field] = json.dumps(fields[json_field])
@@ -2149,7 +2353,7 @@ def update_graph_relationship(conn: sqlite3.Connection, rel_id: str, **fields) -
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [rel_id]
     cursor = conn.execute(
-        f"UPDATE graph_relationships SET {set_clause} WHERE id = ?", values
+        f"UPDATE graph_relationships SET {set_clause} WHERE id = ?", values  # nosec B608
     )
     conn.commit()
     return cursor.rowcount > 0
@@ -2337,10 +2541,11 @@ def upsert_telegram_bot_state(conn: sqlite3.Connection, **fields) -> None:
         ON CONFLICT(id) DO NOTHING"""
     )
     if fields:
+        _validate_fields("telegram_bot_state", fields)
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values())
         conn.execute(
-            f"UPDATE telegram_bot_state SET {set_clause} WHERE id = 1",
+            f"UPDATE telegram_bot_state SET {set_clause} WHERE id = 1",  # nosec B608
             values,
         )
     conn.commit()
@@ -2358,3 +2563,144 @@ def clear_telegram_history(conn: sqlite3.Connection) -> int:
     cursor = conn.execute("DELETE FROM telegram_messages")
     conn.commit()
     return cursor.rowcount
+
+
+# --- Cram CRUD ---
+
+
+def insert_cram_topic(
+    conn: sqlite3.Connection,
+    topic_id: str,
+    topic: str,
+    description: str = "",
+    source_question: str = "",
+    source_answer: str = "",
+    forge_concept_id: Optional[str] = None,
+    commit: bool = True,
+) -> None:
+    """Insert a cram topic."""
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO cram_topics
+        (id, topic, description, source_question, source_answer,
+         forge_concept_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (topic_id, topic, description, source_question, source_answer,
+         forge_concept_id, now, now),
+    )
+    if commit:
+        conn.commit()
+
+
+def get_cram_topic(conn: sqlite3.Connection, topic_id: str) -> Optional[sqlite3.Row]:
+    """Get a single cram topic by ID."""
+    return conn.execute(
+        "SELECT * FROM cram_topics WHERE id = ?", (topic_id,)
+    ).fetchone()
+
+
+def list_cram_topics(
+    conn: sqlite3.Connection,
+    sort_by: str = "understanding",
+) -> list[sqlite3.Row]:
+    """List all cram topics sorted by given field."""
+    valid_sorts = {
+        "understanding": "understanding ASC",
+        "recent": "updated_at DESC",
+        "topic": "topic ASC",
+        "reviews": "review_count DESC",
+    }
+    order = valid_sorts.get(sort_by, "understanding ASC")
+    return conn.execute(
+        f"SELECT * FROM cram_topics ORDER BY {order}"  # nosec B608
+    ).fetchall()
+
+
+def update_cram_topic(
+    conn: sqlite3.Connection,
+    topic_id: str,
+    commit: bool = True,
+    **fields,
+) -> bool:
+    """Update cram topic fields. Returns True if found."""
+    if not fields:
+        return False
+    _validate_fields("cram_topics", fields)
+    fields["updated_at"] = now_iso()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [topic_id]
+    cursor = conn.execute(
+        f"UPDATE cram_topics SET {set_clause} WHERE id = ?", values  # nosec B608
+    )
+    if commit:
+        conn.commit()
+    return cursor.rowcount > 0
+
+
+def delete_cram_topic(conn: sqlite3.Connection, topic_id: str) -> bool:
+    """Delete a cram topic and its reviews (cascade). Returns True if found."""
+    cursor = conn.execute("DELETE FROM cram_topics WHERE id = ?", (topic_id,))
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def insert_cram_review(
+    conn: sqlite3.Connection,
+    topic_id: str,
+    was_correct: bool,
+    confidence: int = 3,
+    notes: str = "",
+    commit: bool = True,
+) -> None:
+    """Insert a cram review record."""
+    conn.execute(
+        """INSERT INTO cram_reviews (topic_id, was_correct, confidence, notes, reviewed_at)
+        VALUES (?, ?, ?, ?, ?)""",
+        (topic_id, 1 if was_correct else 0, confidence, notes, now_iso()),
+    )
+    if commit:
+        conn.commit()
+
+
+def get_cram_reviews(
+    conn: sqlite3.Connection,
+    topic_id: str,
+    limit: int = 20,
+) -> list[sqlite3.Row]:
+    """Get recent reviews for a cram topic."""
+    return conn.execute(
+        """SELECT * FROM cram_reviews
+        WHERE topic_id = ?
+        ORDER BY reviewed_at DESC LIMIT ?""",
+        (topic_id, limit),
+    ).fetchall()
+
+
+def get_cram_stats(conn: sqlite3.Connection) -> dict:
+    """Get aggregate cram statistics."""
+    topics = conn.execute(
+        "SELECT COUNT(*) as total, AVG(understanding) as avg_understanding FROM cram_topics"
+    ).fetchone()
+    reviews = conn.execute(
+        "SELECT COUNT(*) as total FROM cram_reviews"
+    ).fetchone()
+    correct = conn.execute(
+        "SELECT COUNT(*) as total FROM cram_reviews WHERE was_correct = 1"
+    ).fetchone()
+    weak = conn.execute(
+        """SELECT COUNT(*) as total FROM cram_topics
+        WHERE understanding < 0.4"""
+    ).fetchone()
+    strong = conn.execute(
+        """SELECT COUNT(*) as total FROM cram_topics
+        WHERE understanding >= 0.8"""
+    ).fetchone()
+    return {
+        "total_topics": topics["total"],
+        "avg_understanding": round(topics["avg_understanding"] or 0.0, 3),
+        "total_reviews": reviews["total"],
+        "correct_reviews": correct["total"],
+        "accuracy": round(correct["total"] / reviews["total"], 3) if reviews["total"] > 0 else 0.0,
+        "weak_topics": weak["total"],
+        "strong_topics": strong["total"],
+    }

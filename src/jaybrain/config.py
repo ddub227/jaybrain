@@ -1,7 +1,11 @@
 """Paths, constants, and data directory setup."""
 
+import ipaddress
+import logging
 import os
+import socket
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Base directories
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -24,7 +28,61 @@ def _load_env() -> None:
                 os.environ[key] = value
 
 
-_load_env()
+_env_initialized = False
+
+
+def init() -> None:
+    """Load .env and set env-dependent constants. Safe to call multiple times."""
+    global _env_initialized
+    if _env_initialized:
+        return
+    _load_env()
+    _init_env_vars()
+    _env_initialized = True
+
+
+def _init_env_vars() -> None:
+    """Read environment variables into module-level constants."""
+    global SERVICE_ACCOUNT_PATH, GDOC_SHARE_EMAIL, GDOC_FOLDER_ID
+    global HOMELAB_TOOLS_SHEET_ID, SHEETS_INDEX_ID, NEWSAPI_KEY
+    global TELEGRAM_BOT_TOKEN, TELEGRAM_AUTHORIZED_USER
+    global ANTHROPIC_API_KEY, GRAMCRACKER_CLAUDE_MODEL
+    global HOMELAB_JOURNAL_FILENAME, LIFE_DOMAINS_DOC_ID, EVENTBRITE_API_KEY
+
+    SERVICE_ACCOUNT_PATH = Path(
+        os.environ.get(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            os.path.expanduser("~/.config/gcloud/jaybrain-service-account.json"),
+        )
+    )
+    GDOC_SHARE_EMAIL = os.environ.get("GDOC_SHARE_EMAIL", "")
+    GDOC_FOLDER_ID = os.environ.get("GDOC_FOLDER_ID", "")
+    HOMELAB_TOOLS_SHEET_ID = os.environ.get("HOMELAB_TOOLS_SHEET_ID", "")
+    SHEETS_INDEX_ID = os.environ.get("SHEETS_INDEX_ID", "")
+    NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
+
+    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    try:
+        TELEGRAM_AUTHORIZED_USER = int(
+            os.environ.get("TELEGRAM_AUTHORIZED_USER", "0")
+        )
+    except (ValueError, TypeError):
+        TELEGRAM_AUTHORIZED_USER = 0
+        logging.getLogger(__name__).warning(
+            "Invalid TELEGRAM_AUTHORIZED_USER env var, defaulting to 0 (disabled)"
+        )
+
+    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+    GRAMCRACKER_CLAUDE_MODEL = os.environ.get(
+        "GRAMCRACKER_CLAUDE_MODEL", "claude-sonnet-4-20250514"
+    )
+    HOMELAB_JOURNAL_FILENAME = os.environ.get(
+        "HOMELAB_JOURNAL_FILENAME", "Learn Out Loud Lab_{date}.md"
+    )
+    LIFE_DOMAINS_DOC_ID = os.environ.get("LIFE_DOMAINS_DOC_ID", "")
+    EVENTBRITE_API_KEY = os.environ.get("EVENTBRITE_API_KEY", "")
+
+
 DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = DATA_DIR / "jaybrain.db"
 MEMORIES_DIR = DATA_DIR / "memories"
@@ -39,10 +97,7 @@ RESUME_TEMPLATE_PATH = JOB_SEARCH_DIR / "resume_template.md"
 
 # Google Docs integration (OAuth for user account, service account for Sheets MCP)
 SERVICE_ACCOUNT_PATH = Path(
-    os.environ.get(
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        os.path.expanduser("~/.config/gcloud/jaybrain-service-account.json"),
-    )
+    os.path.expanduser("~/.config/gcloud/jaybrain-service-account.json")
 )
 OAUTH_CLIENT_PATH = Path(
     os.path.expanduser("~/.config/gcloud/jaybrain-oauth-client.json")
@@ -50,10 +105,10 @@ OAUTH_CLIENT_PATH = Path(
 OAUTH_TOKEN_PATH = Path(
     os.path.expanduser("~/.config/gcloud/jaybrain-oauth-token.json")
 )
-GDOC_SHARE_EMAIL = os.environ.get("GDOC_SHARE_EMAIL", "")
-GDOC_FOLDER_ID = os.environ.get("GDOC_FOLDER_ID", "")
-HOMELAB_TOOLS_SHEET_ID = os.environ.get("HOMELAB_TOOLS_SHEET_ID", "")
-SHEETS_INDEX_ID = os.environ.get("SHEETS_INDEX_ID", "")
+GDOC_SHARE_EMAIL = ""
+GDOC_FOLDER_ID = ""
+HOMELAB_TOOLS_SHEET_ID = ""
+SHEETS_INDEX_ID = ""
 
 # Centralized OAuth scopes -- all Google API access uses this single list.
 # Adding a scope here requires a one-time re-auth (delete the token file).
@@ -66,7 +121,7 @@ OAUTH_SCOPES = [
 ]
 
 # NewsAPI configuration
-NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
+NEWSAPI_KEY = ""
 NEWSAPI_BASE_URL = "https://newsapi.org/v2"
 
 # Scraping constants
@@ -181,8 +236,8 @@ GRAPH_DEFAULT_DEPTH = 1
 GRAPH_MAX_DEPTH = 3
 
 # --- GramCracker (Telegram bot) ---
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_AUTHORIZED_USER = int(os.environ.get("TELEGRAM_AUTHORIZED_USER", "0"))
+TELEGRAM_BOT_TOKEN = ""  # nosec B105 -- empty default, real value set by init()
+TELEGRAM_AUTHORIZED_USER = 0
 TELEGRAM_POLL_TIMEOUT = 30
 TELEGRAM_API_BASE = "https://api.telegram.org/bot"
 TELEGRAM_MAX_MESSAGE_LEN = 4096
@@ -190,8 +245,8 @@ TELEGRAM_RATE_LIMIT_WINDOW = 60
 TELEGRAM_RATE_LIMIT_MAX = 20
 TELEGRAM_HISTORY_LIMIT = 30
 TELEGRAM_MAX_RESPONSE_TOKENS = 4096
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-GRAMCRACKER_CLAUDE_MODEL = os.environ.get("GRAMCRACKER_CLAUDE_MODEL", "claude-sonnet-4-20250514")
+ANTHROPIC_API_KEY = ""
+GRAMCRACKER_CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
 # Homelab project paths (file-based, not in SQLite)
 HOMELAB_ROOT = Path(os.path.expanduser("~")) / "projects" / "homelab"
@@ -202,10 +257,32 @@ HOMELAB_CODEX_PATH = HOMELAB_NOTES_DIR / "LABSCRIBE_CODEX.md"
 HOMELAB_NEXUS_PATH = HOMELAB_NOTES_DIR / "LAB_NEXUS.md"
 HOMELAB_TOOLS_CSV = HOMELAB_ROOT / "HOMELAB_TOOLS_INVENTORY.csv"
 HOMELAB_ATTACHMENTS_DIR = HOMELAB_JOURNAL_DIR / "attachments"
-HOMELAB_JOURNAL_FILENAME = os.environ.get(
-    "HOMELAB_JOURNAL_FILENAME", "Learn Out Loud Lab_{date}.md"
-)
+HOMELAB_JOURNAL_FILENAME = "Learn Out Loud Lab_{date}.md"
 
+
+# --- Obsidian Vault Sync ---
+VAULT_PATH = Path(os.path.expanduser("~")) / "JayBrain-Vault"
+VAULT_SYNC_ENABLED = True
+VAULT_SYNC_INTERVAL_SECONDS = 60  # daemon checks for changes every 60s
+
+# --- File Watcher (Watchdog) ---
+FILE_WATCHER_ENABLED = True
+FILE_WATCHER_PATHS = [str(PROJECT_ROOT)]
+FILE_WATCHER_IGNORE_PATTERNS: list[str] = []  # additional patterns beyond defaults
+
+# --- GitShadow (Working Tree Snapshots) ---
+GIT_SHADOW_ENABLED = True
+GIT_SHADOW_INTERVAL_SECONDS = 600  # 10 minutes
+GIT_SHADOW_REPO_PATHS = [str(PROJECT_ROOT)]
+
+# Category -> subfolder mapping for memories
+VAULT_MEMORY_FOLDERS = {
+    "decision": "Decisions",
+    "preference": "Preferences",
+    "procedural": "Procedures",
+    "episodic": "Experiences",
+    "semantic": "Knowledge",
+}
 
 # --- Daemon ---
 DAEMON_PID_FILE = DATA_DIR / "daemon.pid"
@@ -222,9 +299,7 @@ CONVERSATION_ARCHIVE_HOUR = 2  # 2 AM daily
 CONVERSATION_ARCHIVE_MAX_AGE_DAYS = 7  # only archive conversations from last N days
 
 # --- Life Domains ---
-LIFE_DOMAINS_DOC_ID = os.environ.get(
-    "LIFE_DOMAINS_DOC_ID", "1_doA_YZS1-tqtI8juPG0w3UC56cGk_a-yI1x4OPieJA"
-)
+LIFE_DOMAINS_DOC_ID = ""
 LIFE_DOMAINS_AVAILABLE_HOURS_WEEK = 40  # hours available outside work/sleep
 
 # --- Time Allocation ---
@@ -246,11 +321,12 @@ NETWORK_DECAY_NUDGE_HOUR = 9
 # --- Heartbeat ---
 HEARTBEAT_FORGE_DUE_THRESHOLD = 5  # notify when this many concepts are due
 HEARTBEAT_APP_STALE_DAYS = 7  # flag apps sitting in "applied" this long
+HEARTBEAT_SESSION_CRASH_ENABLED = False  # stalled session Telegram alerts
 SECURITY_PLUS_EXAM_DATE = "2026-03-01"
 
 # --- Event Discovery ---
 EVENT_DISCOVERY_LOCATION = "Charlotte, NC"
-EVENTBRITE_API_KEY = os.environ.get("EVENTBRITE_API_KEY", "")
+EVENTBRITE_API_KEY = ""
 
 # --- Trash / Soft-Delete ---
 TRASH_DIR = DATA_DIR / "trash"
@@ -265,6 +341,54 @@ TRASH_RETENTION_BY_CATEGORY = {
     "config": 90,
     "general": 30,
 }
+
+# --- SSRF Protection ---
+# Hosts that are allowed to bypass private-IP checks (e.g., local services you trust).
+# Add entries like "192.168.1.50" or "my-homelab.local" if needed.
+SSRF_ALLOWED_HOSTS: set[str] = set()
+
+_logger = logging.getLogger(__name__)
+
+
+def validate_url(url: str) -> str:
+    """Validate a URL is safe to fetch (not targeting private/internal networks).
+
+    Returns the URL unchanged if valid. Raises ValueError with a clear
+    message if the URL is blocked.
+    """
+    parsed = urlparse(url)
+
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"Blocked request: only http/https URLs are allowed, got '{parsed.scheme}'. "
+            f"URL: {url}"
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"Blocked request: no hostname found in URL: {url}")
+
+    if hostname in SSRF_ALLOWED_HOSTS:
+        return url
+
+    try:
+        addr_info = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        raise ValueError(
+            f"Blocked request: could not resolve hostname '{hostname}'. URL: {url}"
+        )
+
+    for family, _, _, _, sockaddr in addr_info:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise ValueError(
+                f"Blocked request to private/internal IP address ({ip}) "
+                f"resolved from '{hostname}'. "
+                f"If this is intentional, add '{hostname}' to "
+                f"SSRF_ALLOWED_HOSTS in config.py."
+            )
+
+    return url
 
 # Directories to scan for garbage files
 TRASH_SCAN_DIRS = [
@@ -316,6 +440,7 @@ TRASH_SUSPECT_PATTERNS = [
 
 def ensure_data_dirs() -> None:
     """Create all required data directories if they don't exist."""
+    init()
     DATA_DIR.mkdir(exist_ok=True)
     MEMORIES_DIR.mkdir(exist_ok=True)
     SESSIONS_DIR.mkdir(exist_ok=True)

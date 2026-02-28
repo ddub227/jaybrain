@@ -18,6 +18,7 @@ dependencies = [
     "google-auth-oauthlib>=1.1",
     "anthropic>=0.40",
     "apscheduler>=3.10,<4",
+    "watchdog>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -52,7 +53,6 @@ skips = [
     "B603",  # subprocess without shell=True (safe -- no user input)
     "B607",  # partial executable path (system commands)
     "B310",  # urllib.urlopen (only used for localhost/known API URLs)
-    "B608",  # SQL f-string construction (internal column names, not user input)
 ]
 
 [tool.pytest.ini_options]

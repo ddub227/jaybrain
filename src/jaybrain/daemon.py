@@ -68,6 +68,7 @@ class DaemonManager:
         self._modules: dict[str, dict] = {}
         self._running = False
         self._pid = os.getpid()
+        self._file_watcher = None
 
     def register_module(
         self,
@@ -75,30 +76,144 @@ class DaemonManager:
         func: Callable,
         trigger: CronTrigger | IntervalTrigger,
         description: str = "",
+        misfire_grace_time: int | None = 300,
     ) -> None:
-        """Register a scheduled module with the daemon."""
+        """Register a scheduled module with the daemon.
+
+        Args:
+            misfire_grace_time: Seconds after the scheduled time that a missed
+                job is still allowed to run.  ``None`` means "always run, no
+                matter how late" (use for user-facing notifications that should
+                catch up after sleep/standby).  Default is 300 s (5 min).
+        """
+        # Wrap the function to log execution to daemon_execution_log
+        wrapped = self._wrap_with_logging(name, func)
         self._modules[name] = {
-            "func": func,
+            "func": wrapped,
             "trigger": trigger,
             "description": description,
         }
         self.scheduler.add_job(
-            func,
+            wrapped,
             trigger=trigger,
             id=name,
             name=name,
             replace_existing=True,
-            misfire_grace_time=300,
+            misfire_grace_time=misfire_grace_time,
+            coalesce=True,
         )
         logger.info("Registered module: %s (%s)", name, description)
 
+    def _wrap_with_logging(self, module_name: str, func: Callable) -> Callable:
+        """Wrap a module function to log execution to daemon_execution_log."""
+        def wrapper():
+            start_time = datetime.now(timezone.utc)
+            start_iso = start_time.isoformat()
+            row_id = None
+            try:
+                conn = _get_raw_conn()
+                cur = conn.execute(
+                    """INSERT INTO daemon_execution_log
+                    (module_name, started_at, status)
+                    VALUES (?, ?, 'running')""",
+                    (module_name, start_iso),
+                )
+                row_id = cur.lastrowid
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass  # Logging failure must never prevent execution
+
+            status = "success"
+            error_msg = ""
+            result = None
+            try:
+                result = func()
+            except Exception as e:
+                status = "error"
+                error_msg = str(e)[:500]
+                logger.error("Module %s failed: %s", module_name, e, exc_info=True)
+
+            # Update the execution log with result
+            end_time = datetime.now(timezone.utc)
+            duration_ms = int((end_time - start_time).total_seconds() * 1000)
+            summary = ""
+            telegram_sent = 0
+            if isinstance(result, dict):
+                summary = str(result)[:200]
+                if result.get("status") == "sent" or result.get("telegram", {}).get("status") == "sent":
+                    telegram_sent = 1
+
+            if row_id is not None:
+                try:
+                    conn = _get_raw_conn()
+                    conn.execute(
+                        """UPDATE daemon_execution_log SET
+                        finished_at=?, status=?, result_summary=?,
+                        error_message=?, telegram_sent=?, duration_ms=?
+                        WHERE id=?""",
+                        (end_time.isoformat(), status, summary,
+                         error_msg, telegram_sent, duration_ms, row_id),
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+
+        return wrapper
+
+    def _log_lifecycle(self, event_type: str, error: str = "") -> None:
+        """Log a daemon lifecycle event (start, stop, crash)."""
+        try:
+            conn = _get_raw_conn()
+            conn.execute(
+                """INSERT INTO daemon_lifecycle_log
+                (event_type, pid, timestamp, modules_registered, trigger, error_message)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    event_type,
+                    self._pid,
+                    datetime.now(timezone.utc).isoformat(),
+                    json.dumps(list(self._modules.keys())),
+                    "task_scheduler" if sys.platform == "win32" else "manual",
+                    error,
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
     def _write_heartbeat(self) -> None:
-        """Update daemon_state with current heartbeat."""
+        """Update daemon_state with current heartbeat.
+
+        Also checks for PID collision: if another daemon has overwritten
+        daemon_state with a different PID, this instance shuts down to
+        prevent dual-daemon conflicts.
+        """
         now = datetime.now(timezone.utc).isoformat()
         module_names = json.dumps(list(self._modules.keys()))
         conn = _get_raw_conn()
         try:
             _ensure_daemon_table(conn)
+            # Check for PID collision before writing
+            row = conn.execute(
+                "SELECT pid FROM daemon_state WHERE id = 1"
+            ).fetchone()
+            if row and row[0] and row[0] != self._pid:
+                other_pid = row[0]
+                # Verify the other PID is actually alive
+                if _is_pid_alive(other_pid):
+                    logger.error(
+                        "PID COLLISION: daemon_state shows PID %d but we are PID %d. "
+                        "Another daemon is running. Shutting down to prevent conflicts.",
+                        other_pid, self._pid,
+                    )
+                    self._log_lifecycle("collision_shutdown",
+                                        f"Detected rival PID {other_pid}")
+                    self._handle_shutdown(None, None)
+                    return
+
             conn.execute(
                 """INSERT INTO daemon_state (id, pid, started_at, last_heartbeat, modules, status)
                 VALUES (1, ?, ?, ?, ?, 'running')
@@ -152,10 +267,24 @@ class DaemonManager:
         if not self._running:
             return
         self._running = False
+        # Stop file watcher thread
+        if self._file_watcher:
+            try:
+                self._file_watcher.stop()
+            except Exception:
+                pass
+        # Release sleep prevention so Windows can sleep normally after daemon stops
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)  # ES_CONTINUOUS only = release
+            except Exception:
+                pass
         try:
             self._write_status("stopped")
         except Exception:
             pass
+        self._log_lifecycle("stopped")
         try:
             DAEMON_PID_FILE.unlink(missing_ok=True)
         except Exception:
@@ -185,6 +314,21 @@ class DaemonManager:
                 import ctypes
                 kernel32 = ctypes.windll.kernel32
 
+                # Prevent Windows from sleeping while the daemon is running.
+                # ES_CONTINUOUS | ES_SYSTEM_REQUIRED tells Windows: "keep the
+                # system awake as long as this process is alive." This works
+                # with Modern Standby (S0 Low Power Idle) which ignores the
+                # traditional "Sleep after = Never" power plan setting.
+                ES_CONTINUOUS = 0x80000000
+                ES_SYSTEM_REQUIRED = 0x00000001
+                result = kernel32.SetThreadExecutionState(
+                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+                )
+                if result:
+                    logger.info("SetThreadExecutionState: system sleep prevention active")
+                else:
+                    logger.warning("SetThreadExecutionState failed — system may sleep")
+
                 @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
                 def _win_handler(ctrl_type):
                     # 0=CTRL_C, 1=CTRL_BREAK, 2=CTRL_CLOSE, 5=CTRL_LOGOFF, 6=CTRL_SHUTDOWN
@@ -197,6 +341,34 @@ class DaemonManager:
             except Exception as e:
                 logger.debug("Could not set Windows ctrl handler: %s", e)
 
+        # Pre-startup check: refuse to start if another daemon is alive in DB
+        conn = _get_raw_conn()
+        try:
+            _ensure_daemon_table(conn)
+            row = conn.execute(
+                "SELECT pid FROM daemon_state WHERE id = 1"
+            ).fetchone()
+            if row and row[0] and row[0] != self._pid:
+                if _is_pid_alive(row[0]):
+                    logger.error(
+                        "STARTUP REFUSED: daemon_state shows alive PID %d, "
+                        "we are PID %d. Exiting.",
+                        row[0], self._pid,
+                    )
+                    self._log_lifecycle(
+                        "startup_refused",
+                        f"Rival PID {row[0]} is alive"
+                    )
+                    conn.close()
+                    return
+        except Exception:
+            logger.debug("Pre-startup PID check failed, proceeding anyway", exc_info=True)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
         # Register heartbeat job
         self.scheduler.add_job(
             self._write_heartbeat,
@@ -208,6 +380,7 @@ class DaemonManager:
 
         self._running = True
         self._write_status("running")
+        self._log_lifecycle("started")
         logger.info(
             "Daemon started (pid=%d, modules=%s)",
             self._pid,
@@ -216,6 +389,14 @@ class DaemonManager:
 
         # Initial heartbeat
         self._write_heartbeat()
+
+        # Start file watcher thread (companion, not scheduled)
+        try:
+            from .file_watcher import FileWatcherThread
+            self._file_watcher = FileWatcherThread()
+            self._file_watcher.start()
+        except Exception:
+            logger.error("Failed to start file watcher", exc_info=True)
 
         try:
             self.scheduler.start()
@@ -370,6 +551,7 @@ def build_daemon() -> DaemonManager:
             run_telegram_briefing,
             CronTrigger(hour=DAILY_BRIEFING_HOUR, minute=DAILY_BRIEFING_MINUTE),
             "Morning Telegram briefing digest",
+            misfire_grace_time=None,
         )
     except Exception:
         logger.error("Failed to register daily_briefing module", exc_info=True)
@@ -413,24 +595,28 @@ def build_daemon() -> DaemonManager:
             check_forge_study_morning,
             CronTrigger(hour=7, minute=0),
             "Morning forge study reminder",
+            misfire_grace_time=None,
         )
         dm.register_module(
             "exam_countdown",
             check_exam_countdown,
             CronTrigger(hour=7, minute=15),
             "Daily Security+ exam countdown",
+            misfire_grace_time=None,
         )
         dm.register_module(
             "stale_applications",
             check_stale_applications,
             CronTrigger(hour=9, minute=0),
             "Check for stale job applications",
+            misfire_grace_time=None,
         )
         dm.register_module(
             "forge_study_evening",
             check_forge_study_evening,
             CronTrigger(hour=19, minute=0),
             "Evening forge study reminder",
+            misfire_grace_time=None,
         )
         dm.register_module(
             "goal_staleness",
@@ -493,6 +679,32 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register job_board_autofetch module", exc_info=True)
 
+    # Phase 7: Obsidian vault sync (every 60 seconds)
+    try:
+        from .vault_sync import run_vault_sync
+        from .config import VAULT_SYNC_INTERVAL_SECONDS
+        dm.register_module(
+            "vault_sync",
+            run_vault_sync,
+            IntervalTrigger(seconds=VAULT_SYNC_INTERVAL_SECONDS),
+            "Sync JayBrain DB to Obsidian vault",
+        )
+    except Exception:
+        logger.error("Failed to register vault_sync module", exc_info=True)
+
+    # Phase 8: GitShadow -- working tree snapshots every 10 min
+    try:
+        from .git_shadow import run_git_shadow
+        from .config import GIT_SHADOW_INTERVAL_SECONDS
+        dm.register_module(
+            "git_shadow",
+            run_git_shadow,
+            IntervalTrigger(seconds=GIT_SHADOW_INTERVAL_SECONDS),
+            "Periodic git working tree snapshots",
+        )
+    except Exception:
+        logger.error("Failed to register git_shadow module", exc_info=True)
+
     # Phase 6: Trash -- weekly auto-cleanup (Sunday 2 AM) + daily expiry sweep (3 AM)
     try:
         from .trash import run_auto_cleanup, sweep_expired
@@ -510,5 +722,28 @@ def build_daemon() -> DaemonManager:
         )
     except Exception:
         logger.error("Failed to register trash module", exc_info=True)
+
+    # Post-registration audit: log how many modules registered and warn if low
+    expected_modules = {
+        "conversation_archive", "daily_briefing", "life_domains_sync",
+        "life_domains_metrics", "session_crash_check", "forge_study_morning",
+        "exam_countdown", "stale_applications", "forge_study_evening",
+        "goal_staleness", "time_allocation_weekly", "network_decay",
+        "event_discovery", "job_board_autofetch", "vault_sync",
+        "trash_auto_cleanup", "trash_sweep", "git_shadow",
+    }
+    registered = set(dm.modules)
+    missing = expected_modules - registered
+    if missing:
+        logger.error(
+            "MODULE REGISTRATION INCOMPLETE: %d/%d modules registered. "
+            "Missing: %s",
+            len(registered), len(expected_modules), sorted(missing),
+        )
+    else:
+        logger.info(
+            "All %d expected modules registered successfully.",
+            len(registered),
+        )
 
     return dm

@@ -30,6 +30,7 @@ from .config import (
 # Valid outcomes for record_review
 VALID_OUTCOMES = {"understood", "reviewed", "struggled", "skipped"}
 from .db import (
+    fts5_safe_query,
     get_connection,
     get_concepts_for_objective,
     get_error_patterns,
@@ -169,16 +170,6 @@ def _classify_error(
         return "slip"
     return "mistake"
 
-
-def _fts5_safe_query(query: str) -> str:
-    """Convert a natural language query into a safe FTS5 query."""
-    words = query.split()
-    safe_words = []
-    for word in words:
-        cleaned = "".join(c for c in word if c.isalnum() or c == "_")
-        if cleaned:
-            safe_words.append(f'"{cleaned}"')
-    return " ".join(safe_words)
 
 
 # --- Public API ---
@@ -527,7 +518,7 @@ def search_concepts(
         # Keyword search
         fts_results = []
         try:
-            safe_query = _fts5_safe_query(query)
+            safe_query = fts5_safe_query(query)
             if safe_query:
                 fts_results = search_forge_fts(conn, safe_query, SEARCH_CANDIDATES)
         except Exception as e:

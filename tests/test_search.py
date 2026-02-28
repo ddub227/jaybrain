@@ -1,8 +1,12 @@
 """Tests for hybrid search engine."""
 
+import hashlib
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
-from jaybrain.search import hybrid_search
+from jaybrain.search import hybrid_search, _verify_model_hash, _ONNX_MODEL_SHA256
 
 
 class TestHybridSearch:
@@ -57,3 +61,31 @@ class TestHybridSearch:
         assert merged_vec[0][0] == "a"
         # With full keyword weight, "b" should be first (it has best keyword score)
         assert merged_kw[0][0] == "b"
+
+
+class TestModelHashVerification:
+    """Tests for ONNX model integrity check (SEC-7)."""
+
+    def test_valid_hash_passes(self, tmp_path):
+        model_file = tmp_path / "model.onnx"
+        content = b"fake model content for testing"
+        model_file.write_bytes(content)
+        expected_hash = hashlib.sha256(content).hexdigest()
+        with patch("jaybrain.search._ONNX_MODEL_SHA256", expected_hash):
+            _verify_model_hash(model_file)
+
+    def test_tampered_file_raises(self, tmp_path):
+        model_file = tmp_path / "model.onnx"
+        model_file.write_bytes(b"tampered content")
+        with pytest.raises(RuntimeError, match="integrity check failed"):
+            _verify_model_hash(model_file)
+
+    def test_empty_file_raises(self, tmp_path):
+        model_file = tmp_path / "model.onnx"
+        model_file.write_bytes(b"")
+        with pytest.raises(RuntimeError, match="integrity check failed"):
+            _verify_model_hash(model_file)
+
+    def test_expected_hash_is_sha256_format(self):
+        assert len(_ONNX_MODEL_SHA256) == 64
+        assert all(c in "0123456789abcdef" for c in _ONNX_MODEL_SHA256)

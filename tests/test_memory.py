@@ -7,7 +7,8 @@ import pytest
 
 from jaybrain.config import ensure_data_dirs
 from jaybrain.db import init_db, get_connection, insert_memory, get_memories_batch
-from jaybrain.memory import compute_decay, _fts5_safe_query, _write_memory_markdown, _parse_memory_row
+from jaybrain.db import fts5_safe_query
+from jaybrain.memory import compute_decay, _write_memory_markdown, _parse_memory_row
 from jaybrain.models import Memory, MemoryCategory
 
 
@@ -103,18 +104,18 @@ class TestComputeDecay:
 
 class TestFts5SafeQuery:
     def test_simple_query(self):
-        assert _fts5_safe_query("hello world") == '"hello" "world"'
+        assert fts5_safe_query("hello world") == '"hello" "world"'
 
     def test_special_characters(self):
-        result = _fts5_safe_query("AND OR NOT -test")
+        result = fts5_safe_query("AND OR NOT -test")
         assert '"AND"' in result
         assert '"test"' in result
 
     def test_empty_query(self):
-        assert _fts5_safe_query("") == ""
+        assert fts5_safe_query("") == ""
 
     def test_punctuation_stripped(self):
-        result = _fts5_safe_query("hello, world!")
+        result = fts5_safe_query("hello, world!")
         assert '"hello"' in result
         assert '"world"' in result
 

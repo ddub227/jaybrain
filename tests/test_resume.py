@@ -176,6 +176,30 @@ class TestSaveTailoredDocuments:
         assert _safe_filename("SOC Analyst") == "SocAnalyst"
         assert _safe_filename("simple") == "Simple"
 
+    def test_safe_filename_path_traversal(self):
+        result = _safe_filename("../../../etc/passwd")
+        assert "/" not in result
+        assert "\\" not in result
+        assert ".." not in result
+
+    def test_safe_filename_special_chars(self):
+        result = _safe_filename("Test<>:\"/\\|?*File")
+        assert all(c not in result for c in '<>:"/\\|?*')
+
+    def test_safe_filename_empty_string(self):
+        result = _safe_filename("")
+        assert isinstance(result, str)
+
+    def test_safe_filename_truncation(self):
+        long_name = "A" * 200
+        result = _safe_filename(long_name)
+        assert len(result) <= 50
+
+    def test_safe_filename_unicode(self):
+        result = _safe_filename("Resum\u00e9 - Caf\u00e9")
+        assert isinstance(result, str)
+        assert len(result) > 0
+
 
 class TestInterviewPrepCRUD:
     def test_insert_and_get_prep(self, temp_data_dir):

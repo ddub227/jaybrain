@@ -16,7 +16,7 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
-from .config import SCRAPE_TIMEOUT, SCRAPE_USER_AGENT, SCRAPE_MAX_PAGES
+from .config import SCRAPE_TIMEOUT, SCRAPE_USER_AGENT, SCRAPE_MAX_PAGES, validate_url
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +197,8 @@ def fetch_page(url: str, render: str = "auto") -> dict:
     Returns dict with keys: html, url, rendered (bool), status_code.
     """
     import requests
+
+    validate_url(url)
 
     headers = {"User-Agent": SCRAPE_USER_AGENT}
     rendered = False

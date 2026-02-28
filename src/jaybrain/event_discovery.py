@@ -20,6 +20,7 @@ from .config import (
     SCRAPE_TIMEOUT,
     SCRAPE_USER_AGENT,
     ensure_data_dirs,
+    validate_url,
 )
 from .db import get_connection, now_iso
 
@@ -156,6 +157,7 @@ def discover_web_events(location: str = "") -> list[dict]:
 
     for url in urls:
         try:
+            validate_url(url)
             resp = requests.get(url, headers=headers, timeout=SCRAPE_TIMEOUT)
             if resp.status_code != 200:
                 continue
@@ -289,7 +291,7 @@ def run_event_discovery() -> dict:
             for e in top_events:
                 lines.append(f"  - {e['title']} (relevance: {e.get('relevance_score', 0):.0%})")
             from .telegram import send_telegram_message
-            send_telegram_message("\n".join(lines))
+            send_telegram_message("\n".join(lines), caller="daemon_event_discovery")
         except Exception:
             pass  # Notification is optional
 

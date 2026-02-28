@@ -19,6 +19,7 @@ from .config import (
     SEARCH_CANDIDATES,
 )
 from .db import (
+    fts5_safe_query,
     get_connection,
     insert_memory,
     delete_memory,
@@ -189,7 +190,7 @@ def recall(
         fts_results = []
         try:
             # Escape FTS5 special characters for safe query
-            safe_query = _fts5_safe_query(query)
+            safe_query = fts5_safe_query(query)
             if safe_query:
                 fts_results = search_memories_fts(conn, safe_query, SEARCH_CANDIDATES)
         except Exception as e:
@@ -279,18 +280,3 @@ def reinforce(memory_id: str) -> Optional[Memory]:
     finally:
         conn.close()
 
-
-def _fts5_safe_query(query: str) -> str:
-    """Convert a natural language query into a safe FTS5 query.
-
-    Wraps individual words in quotes to avoid FTS5 syntax errors from
-    special characters like AND, OR, NOT, -, etc.
-    """
-    words = query.split()
-    safe_words = []
-    for word in words:
-        # Strip punctuation that could cause FTS5 issues
-        cleaned = "".join(c for c in word if c.isalnum() or c == "_")
-        if cleaned:
-            safe_words.append(f'"{cleaned}"')
-    return " ".join(safe_words)

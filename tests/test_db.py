@@ -10,6 +10,7 @@ from jaybrain.db import (
     now_iso,
     _serialize_f32,
     _deserialize_f32,
+    _validate_fields,
     # Memory CRUD
     insert_memory,
     get_memory,
@@ -66,6 +67,70 @@ class TestSerialization:
     def test_serialize_empty(self):
         assert _serialize_f32([]) == b""
         assert _deserialize_f32(b"") == []
+
+
+class TestValidateFields:
+    """Tests for column allowlist enforcement (SEC-1)."""
+
+    def test_allows_valid_task_fields(self):
+        _validate_fields("tasks", {"title": "new", "status": "done"})
+
+    def test_allows_valid_knowledge_fields(self):
+        _validate_fields("knowledge", {"title": "t", "content": "c", "category": "ref"})
+
+    def test_rejects_id_column(self):
+        with pytest.raises(ValueError, match="Invalid column"):
+            _validate_fields("tasks", {"id": "injected", "title": "test"})
+
+    def test_rejects_created_at(self):
+        with pytest.raises(ValueError, match="Invalid column"):
+            _validate_fields("tasks", {"created_at": "2024-01-01"})
+
+    def test_rejects_unknown_column(self):
+        with pytest.raises(ValueError, match="Invalid column"):
+            _validate_fields("tasks", {"drop_table": "yes"})
+
+    def test_rejects_sql_injection_column(self):
+        with pytest.raises(ValueError, match="Invalid column"):
+            _validate_fields("tasks", {"title = 'x'; DROP TABLE tasks; --": "val"})
+
+    def test_rejects_unknown_table(self):
+        with pytest.raises(ValueError, match="No column allowlist"):
+            _validate_fields("nonexistent_table", {"anything": "val"})
+
+    def test_empty_fields_passes(self):
+        _validate_fields("tasks", {})
+
+    def test_all_tables_have_allowlists(self):
+        from jaybrain.db import _UPDATABLE_COLUMNS
+        expected_tables = {
+            "tasks", "knowledge", "forge_concepts", "job_boards",
+            "applications", "graph_entities", "graph_relationships",
+            "telegram_bot_state", "cram_topics",
+        }
+        assert set(_UPDATABLE_COLUMNS.keys()) == expected_tables
+
+    def test_integration_update_task_rejects_bad_column(self, temp_data_dir):
+        _setup(temp_data_dir)
+        conn = get_connection()
+        try:
+            insert_task(conn, "t1", "Test Task", "", "todo", "medium", "", [], None)
+            with pytest.raises(ValueError, match="Invalid column"):
+                update_task(conn, "t1", id="injected_id")
+        finally:
+            conn.close()
+
+    def test_integration_update_task_accepts_valid_column(self, temp_data_dir):
+        _setup(temp_data_dir)
+        conn = get_connection()
+        try:
+            insert_task(conn, "t1", "Test Task", "", "todo", "medium", "", [], None)
+            result = update_task(conn, "t1", status="done")
+            assert result is True
+            row = get_task(conn, "t1")
+            assert row["status"] == "done"
+        finally:
+            conn.close()
 
 
 class TestConnection:

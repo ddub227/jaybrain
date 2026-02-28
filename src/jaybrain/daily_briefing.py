@@ -1723,7 +1723,7 @@ def run_telegram_briefing() -> dict:
 
     try:
         from .telegram import send_telegram_message
-        result = send_telegram_message(message)
+        result = send_telegram_message(message, caller="daemon_daily_briefing")
         logger.info("Telegram briefing sent: %s", result.get("status", "unknown"))
         return {"status": "sent", "length": len(message), "telegram": result}
     except Exception as e:

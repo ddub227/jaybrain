@@ -156,7 +156,7 @@ def save_tailored_resume(company: str, role: str, content: str) -> dict:
     resumes_dir.mkdir(parents=True, exist_ok=True)
 
     profile = get_profile()
-    profile_name = profile.get("name", "").replace(" ", "") or "User"
+    profile_name = _safe_filename(profile.get("name", "") or "User")
 
     safe_company = _safe_filename(company)
     safe_role = _safe_filename(role)
@@ -196,7 +196,7 @@ def save_cover_letter(company: str, role: str, content: str) -> dict:
     cover_dir.mkdir(parents=True, exist_ok=True)
 
     profile = get_profile()
-    profile_name = profile.get("name", "").replace(" ", "") or "User"
+    profile_name = _safe_filename(profile.get("name", "") or "User")
 
     safe_company = _safe_filename(company)
     safe_role = _safe_filename(role)

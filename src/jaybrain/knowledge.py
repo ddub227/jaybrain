@@ -10,6 +10,7 @@ from typing import Optional
 
 from .config import SEARCH_CANDIDATES, DEFAULT_SEARCH_LIMIT
 from .db import (
+    fts5_safe_query,
     get_connection,
     insert_knowledge,
     update_knowledge,
@@ -87,7 +88,7 @@ def search_knowledge_entries(
         # Keyword search
         fts_results = []
         try:
-            safe_query = _fts5_safe_query(query)
+            safe_query = fts5_safe_query(query)
             if safe_query:
                 fts_results = search_knowledge_fts(conn, safe_query, SEARCH_CANDIDATES)
         except Exception as e:
@@ -120,11 +121,15 @@ def search_knowledge_entries(
 
 
 def modify_knowledge(knowledge_id: str, **fields) -> Optional[Knowledge]:
-    """Update a knowledge entry's fields."""
-    # If content or title changed, update the embedding
-    if "content" in fields or "title" in fields:
-        conn = get_connection()
-        try:
+    """Update a knowledge entry's fields.
+
+    Uses a single connection so that the relational update and any
+    embedding update are atomic (committed together or not at all).
+    """
+    conn = get_connection()
+    try:
+        # If content or title changed, update the embedding
+        if "content" in fields or "title" in fields:
             row = get_knowledge(conn, knowledge_id)
             if not row:
                 return None
@@ -139,11 +144,7 @@ def modify_knowledge(knowledge_id: str, **fields) -> Optional[Knowledge]:
                 )
             except Exception as e:
                 logger.warning("Failed to update knowledge embedding: %s", e)
-        finally:
-            conn.close()
 
-    conn = get_connection()
-    try:
         success = update_knowledge(conn, knowledge_id, **fields)
         if not success:
             return None
@@ -155,12 +156,3 @@ def modify_knowledge(knowledge_id: str, **fields) -> Optional[Knowledge]:
         conn.close()
 
 
-def _fts5_safe_query(query: str) -> str:
-    """Convert a natural language query into a safe FTS5 query."""
-    words = query.split()
-    safe_words = []
-    for word in words:
-        cleaned = "".join(c for c in word if c.isalnum() or c == "_")
-        if cleaned:
-            safe_words.append(f'"{cleaned}"')
-    return " ".join(safe_words)

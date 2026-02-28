@@ -8,10 +8,12 @@ Requires: pip install jaybrain[render] && playwright install chromium
 
 from __future__ import annotations
 
+import functools
 import json as _json
 import logging
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -19,6 +21,20 @@ from typing import Optional
 from .config import DATA_DIR
 
 logger = logging.getLogger("jaybrain.browser")
+
+# Reentrant lock protecting _state.  RLock (not Lock) so that nested calls
+# like launch_browser -> close_browser don't deadlock.
+_lock = threading.RLock()
+
+
+def _synchronized(func):
+    """Decorator that holds _lock for the entire function call."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _lock:
+            return func(*args, **kwargs)
+    return wrapper
+
 
 # Browser state singleton - persists across tool calls within a session
 _state: dict = {
@@ -66,7 +82,10 @@ SNAPSHOT_MAX_LINES = 500
 # ---------------------------------------------------------------------------
 
 def _ensure_playwright(stealth: bool | None = None):
-    """Import and start Playwright (or Patchright in stealth mode)."""
+    """Import and start Playwright (or Patchright in stealth mode).
+
+    Caller must hold _lock.
+    """
     use_stealth = stealth if stealth is not None else _state["_stealth"]
 
     if use_stealth:
@@ -265,6 +284,7 @@ def _safe_wait(page, state: str = "domcontentloaded", timeout: int = 5000):
 # Public API - called by server.py tool wrappers
 # ---------------------------------------------------------------------------
 
+@_synchronized
 def launch_browser(
     headless: bool = True,
     url: str = "",
@@ -303,6 +323,7 @@ def launch_browser(
     return result
 
 
+@_synchronized
 def navigate(url: str) -> dict:
     """Navigate to a URL."""
     page = _ensure_page()
@@ -315,6 +336,7 @@ def navigate(url: str) -> dict:
     }
 
 
+@_synchronized
 def snapshot() -> dict:
     """Get accessibility tree snapshot with numbered element refs."""
     page = _ensure_page()
@@ -338,6 +360,7 @@ def snapshot() -> dict:
     }
 
 
+@_synchronized
 def take_screenshot(full_page: bool = False) -> dict:
     """Take a screenshot, save to file, return path for viewing."""
     page = _ensure_page()
@@ -355,6 +378,7 @@ def take_screenshot(full_page: bool = False) -> dict:
     }
 
 
+@_synchronized
 def click(ref: int | None = None, selector: str | None = None) -> dict:
     """Click an element by ref number or CSS selector."""
     page = _ensure_page()
@@ -368,6 +392,7 @@ def click(ref: int | None = None, selector: str | None = None) -> dict:
     }
 
 
+@_synchronized
 def type_text(
     text: str,
     ref: int | None = None,
@@ -388,6 +413,7 @@ def type_text(
     }
 
 
+@_synchronized
 def press_key(key: str) -> dict:
     """Press a keyboard key (e.g. Enter, Tab, Escape, ArrowDown)."""
     page = _ensure_page()
@@ -399,16 +425,42 @@ def press_key(key: str) -> dict:
     }
 
 
-def evaluate_js(expression: str) -> dict:
-    """Evaluate a JavaScript expression in the page context."""
+SAFE_JS_EXPRESSIONS: dict[str, str] = {
+    "title": "document.title",
+    "url": "window.location.href",
+    "text": "document.body.innerText",
+    "html": "document.body.innerHTML",
+    "ready_state": "document.readyState",
+    "scroll_y": "window.scrollY",
+    "scroll_height": "document.body.scrollHeight",
+    "viewport_height": "window.innerHeight",
+    "selected_text": "window.getSelection().toString()",
+    "forms_count": "document.forms.length",
+    "links_count": "document.links.length",
+    "cookies_enabled": "navigator.cookieEnabled",
+}
+
+
+@_synchronized
+def evaluate_js(name: str) -> dict:
+    """Evaluate a named JavaScript expression from the safe allowlist."""
+    expression = SAFE_JS_EXPRESSIONS.get(name)
+    if expression is None:
+        allowed = ", ".join(sorted(SAFE_JS_EXPRESSIONS.keys()))
+        return {
+            "status": "error",
+            "error": f"Unknown expression '{name}'. Allowed: {allowed}",
+        }
     page = _ensure_page()
     result = page.evaluate(expression)
     return {
         "status": "ok",
+        "name": name,
         "result": str(result) if result is not None else None,
     }
 
 
+@_synchronized
 def close_browser() -> dict:
     """Close browser and release all resources."""
     try:
@@ -478,6 +530,7 @@ def _find_chrome_executable() -> str:
     )
 
 
+@_synchronized
 def launch_with_cdp(
     port: int = CDP_DEFAULT_PORT,
     url: str = "",
@@ -577,6 +630,7 @@ def launch_with_cdp(
     return connect_to_cdp(f"http://127.0.0.1:{port}")
 
 
+@_synchronized
 def connect_to_cdp(endpoint: str = "") -> dict:
     """Connect Playwright to an already-running Chrome via CDP.
 
@@ -646,6 +700,7 @@ def connect_to_cdp(endpoint: str = "") -> dict:
     }
 
 
+@_synchronized
 def disconnect_cdp() -> dict:
     """Disconnect Playwright from the CDP browser WITHOUT closing it.
 
@@ -671,6 +726,7 @@ def disconnect_cdp() -> dict:
 # Phase 2: Session persistence, Bitwarden, advanced interactions
 # ---------------------------------------------------------------------------
 
+@_synchronized
 def session_save(name: str) -> dict:
     """Save browser session (cookies + localStorage) to a named file."""
     page = _ensure_page()
@@ -696,6 +752,7 @@ def session_save(name: str) -> dict:
     }
 
 
+@_synchronized
 def session_load(
     name: str,
     headless: bool | None = None,
@@ -781,6 +838,7 @@ def session_list() -> dict:
     return {"sessions": sessions, "count": len(sessions)}
 
 
+@_synchronized
 def fill_from_bw(
     item_name: str,
     field: str,
@@ -819,7 +877,11 @@ def fill_from_bw(
                 "  bw unlock\n"
                 "Then set BW_SESSION in your environment."
             )
-        raise RuntimeError(f"Bitwarden CLI error: {stderr}")
+        logger.debug("Bitwarden CLI stderr: %s", stderr)
+        raise RuntimeError(
+            "Bitwarden CLI returned an error. Check vault state. "
+            "Run 'bw status' to diagnose. (Details logged at DEBUG level.)"
+        )
 
     value = proc.stdout.strip()
     if not value:
@@ -845,6 +907,7 @@ def fill_from_bw(
     }
 
 
+@_synchronized
 def select_option(
     ref: int | None = None,
     selector: str | None = None,
@@ -875,6 +938,7 @@ def select_option(
     }
 
 
+@_synchronized
 def wait_for(
     selector: str | None = None,
     text: str | None = None,
@@ -906,6 +970,7 @@ def wait_for(
         raise ValueError("Provide either selector or text to wait for.")
 
 
+@_synchronized
 def hover(ref: int | None = None, selector: str | None = None) -> dict:
     """Hover over an element (useful for dropdown menus)."""
     page = _ensure_page()
@@ -921,6 +986,7 @@ def hover(ref: int | None = None, selector: str | None = None) -> dict:
 # Phase 4: Multi-tab, navigation history
 # ---------------------------------------------------------------------------
 
+@_synchronized
 def go_back() -> dict:
     """Navigate back in browser history."""
     page = _ensure_page()
@@ -933,6 +999,7 @@ def go_back() -> dict:
     }
 
 
+@_synchronized
 def go_forward() -> dict:
     """Navigate forward in browser history."""
     page = _ensure_page()
@@ -945,6 +1012,7 @@ def go_forward() -> dict:
     }
 
 
+@_synchronized
 def tab_list() -> dict:
     """List all open tabs with their URLs and titles."""
     if not _state["context"]:
@@ -967,6 +1035,7 @@ def tab_list() -> dict:
     return {"tabs": tabs, "count": len(tabs)}
 
 
+@_synchronized
 def tab_new(url: str = "") -> dict:
     """Open a new tab, optionally navigating to a URL."""
     if not _state["context"]:
@@ -986,6 +1055,7 @@ def tab_new(url: str = "") -> dict:
     return result
 
 
+@_synchronized
 def tab_switch(index: int) -> dict:
     """Switch to a tab by index (from browser_tab_list)."""
     if not _state["context"]:
@@ -1010,6 +1080,7 @@ def tab_switch(index: int) -> dict:
     }
 
 
+@_synchronized
 def tab_close(index: int | None = None) -> dict:
     """Close a tab by index, or close the current tab if no index given."""
     if not _state["context"]:

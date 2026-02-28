@@ -231,7 +231,11 @@ def summarize_conversation(conversation: dict) -> str:
         f"{transcript}"
     )
 
-    claude_cmd = shutil.which("claude") or "claude"
+    claude_cmd = os.environ.get("CLAUDE_BINARY_PATH") or shutil.which("claude") or "claude"
+    resolved = Path(claude_cmd).resolve()
+    if not resolved.is_file():
+        logger.warning("Claude binary not found at: %s", claude_cmd)
+        return None
     # Strip Claude Code env vars so subprocess doesn't think it's nested
     clean_env = {
         k: v for k, v in os.environ.items()

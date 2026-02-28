@@ -8,7 +8,9 @@ to produce professional documents alongside local markdown files.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -41,6 +43,15 @@ def _get_credentials():
             creds = Credentials.from_authorized_user_file(
                 str(OAUTH_TOKEN_PATH), scopes,
             )
+            # Validate scopes match -- if config added new scopes since
+            # the token was issued, force re-authorization (Mistake #014)
+            if creds and creds.scopes and set(scopes) - set(creds.scopes):
+                missing = set(scopes) - set(creds.scopes)
+                logger.warning(
+                    "OAuth token missing scopes %s — forcing re-auth",
+                    missing,
+                )
+                creds = None
 
         # Refresh or run auth flow
         if creds and creds.expired and creds.refresh_token:
@@ -54,9 +65,11 @@ def _get_credentials():
             )
             creds = flow.run_local_server(port=0)
 
-        # Cache the token for future use
+        # Cache the token for future use (owner-only permissions)
         OAUTH_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
         OAUTH_TOKEN_PATH.write_text(creds.to_json())
+        if sys.platform != "win32":
+            os.chmod(OAUTH_TOKEN_PATH, 0o600)
 
         return creds
     except ImportError:

@@ -5,6 +5,35 @@ import pytest
 from pathlib import Path
 
 
+class TestEvaluateJsAllowlist:
+    """Unit tests for JS expression allowlist (SEC-2). No browser needed."""
+
+    def test_allowlist_has_expected_entries(self):
+        from jaybrain.browser import SAFE_JS_EXPRESSIONS
+        expected = {"title", "url", "text", "html", "ready_state", "scroll_y",
+                    "scroll_height", "viewport_height", "selected_text",
+                    "forms_count", "links_count", "cookies_enabled"}
+        assert expected == set(SAFE_JS_EXPRESSIONS.keys())
+
+    def test_allowlist_values_are_js_strings(self):
+        from jaybrain.browser import SAFE_JS_EXPRESSIONS
+        for name, expr in SAFE_JS_EXPRESSIONS.items():
+            assert isinstance(expr, str), f"{name} has non-string value"
+            assert len(expr) > 0, f"{name} has empty expression"
+
+    def test_raw_js_not_in_allowlist(self):
+        from jaybrain.browser import SAFE_JS_EXPRESSIONS
+        dangerous = [
+            "document.title",
+            "window.location.href",
+            "alert(1)",
+            "fetch('http://evil.com')",
+            "document.cookie",
+        ]
+        for expr in dangerous:
+            assert expr not in SAFE_JS_EXPRESSIONS, f"Raw JS '{expr}' should not be a key"
+
+
 def test_browser_launch_and_close():
     """Test launching and closing the browser."""
     from jaybrain.browser import launch_browser, close_browser
@@ -142,14 +171,19 @@ def test_browser_press_key():
 
 
 def test_browser_evaluate_js():
-    """Test evaluating JavaScript."""
+    """Test evaluating JavaScript via allowlist name."""
     from jaybrain.browser import launch_browser, evaluate_js, close_browser
 
     try:
         launch_browser(headless=True, url="https://example.com")
-        result = evaluate_js("document.title")
+        result = evaluate_js("title")
         assert result["status"] == "ok"
         assert result["result"]  # should return the page title
+
+        # Unknown names should return an error, not execute
+        bad = evaluate_js("document.title")
+        assert bad["status"] == "error"
+        assert "Unknown expression" in bad["error"]
     finally:
         close_browser()
 
@@ -388,12 +422,12 @@ def test_stealth_launch_and_navigate():
 
 
 def test_stealth_evaluate_js():
-    """Test that stealth mode supports JS evaluation."""
+    """Test that stealth mode supports JS evaluation via allowlist."""
     from jaybrain.browser import launch_browser, evaluate_js, close_browser
 
     try:
         launch_browser(headless=True, stealth=True, url="https://example.com")
-        result = evaluate_js("document.title")
+        result = evaluate_js("title")
         assert result["status"] == "ok"
         assert "Example" in result["result"]
     finally:
@@ -421,7 +455,7 @@ def test_normal_after_stealth():
 
         # Launch normal
         launch_browser(headless=True, stealth=False, url="https://example.com")
-        result = evaluate_js("document.title")
+        result = evaluate_js("title")
         assert result["status"] == "ok"
     finally:
         close_browser()

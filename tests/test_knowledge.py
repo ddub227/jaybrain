@@ -5,11 +5,11 @@ from unittest.mock import patch
 
 from jaybrain.db import init_db, get_connection, insert_knowledge
 from jaybrain.config import ensure_data_dirs
+from jaybrain.db import fts5_safe_query
 from jaybrain.knowledge import (
     store_knowledge,
     search_knowledge_entries,
     modify_knowledge,
-    _fts5_safe_query,
 )
 
 
@@ -30,19 +30,19 @@ def mock_embed():
 
 class TestFts5SafeQuery:
     def test_simple_query(self):
-        assert _fts5_safe_query("hello world") == '"hello" "world"'
+        assert fts5_safe_query("hello world") == '"hello" "world"'
 
     def test_special_characters_stripped(self):
-        result = _fts5_safe_query("python3.12 c++ node.js")
+        result = fts5_safe_query("python3.12 c++ node.js")
         assert '"python312"' in result
         assert '"c"' in result
         assert '"nodejs"' in result
 
     def test_empty_query(self):
-        assert _fts5_safe_query("") == ""
+        assert fts5_safe_query("") == ""
 
     def test_only_special_chars(self):
-        assert _fts5_safe_query("!@#$%") == ""
+        assert fts5_safe_query("!@#$%") == ""
 
 
 class TestStoreKnowledge:

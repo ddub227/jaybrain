@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -132,17 +133,20 @@ class RateLimiter:
         self._max = max_calls
         self._window = window_seconds
         self._timestamps: list[float] = []
+        self._lock = threading.Lock()
 
     def _prune(self) -> None:
         cutoff = time.time() - self._window
         self._timestamps = [t for t in self._timestamps if t > cutoff]
 
     def allow(self) -> bool:
-        self._prune()
-        return len(self._timestamps) < self._max
+        with self._lock:
+            self._prune()
+            return len(self._timestamps) < self._max
 
     def record(self) -> None:
-        self._timestamps.append(time.time())
+        with self._lock:
+            self._timestamps.append(time.time())
 
     def wait_if_needed(self) -> None:
         """Block until a slot opens."""
@@ -1074,8 +1078,33 @@ def _execute_tool(name: str, inputs: dict) -> str:
 # Standalone send (for MCP tool -- works even if bot is stopped)
 # ---------------------------------------------------------------------------
 
-def send_telegram_message(text: str) -> dict:
-    """Send a message to JJ via Telegram. Used by the MCP tool."""
+def _log_telegram_send(
+    caller: str, chat_id: str, text: str,
+    chunks_sent: int, status: str, error: str = "",
+) -> None:
+    """Log a Telegram send to the telegram_send_log table."""
+    try:
+        from .db import get_connection, now_iso
+        conn = get_connection()
+        preview = text[:100] if text else ""
+        conn.execute(
+            """INSERT INTO telegram_send_log
+            (timestamp, caller, chat_id, message_preview, chunks_sent, status, error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (now_iso(), caller, str(chat_id), preview, chunks_sent, status, error),
+        )
+        conn.commit()
+    except Exception:
+        pass  # Logging failure must never break message delivery
+
+
+def send_telegram_message(text: str, caller: str = "mcp_tool") -> dict:
+    """Send a message to JJ via Telegram. Used by the MCP tool and daemon.
+
+    Args:
+        text: Message text to send.
+        caller: Identifier for who is calling (for audit logging).
+    """
     if not TELEGRAM_BOT_TOKEN:
         return {"error": "TELEGRAM_BOT_TOKEN not set"}
 
@@ -1093,8 +1122,10 @@ def send_telegram_message(text: str) -> dict:
                 api.send_message_plain(chat_id, chunk)
                 sent += 1
             except Exception as e:
+                _log_telegram_send(caller, chat_id, text, sent, "error", str(e))
                 return {"error": str(e), "chunks_sent": sent}
 
+    _log_telegram_send(caller, chat_id, text, sent, "sent")
     return {"status": "sent", "chunks": sent, "total_length": len(text)}
 
 
@@ -1143,6 +1174,9 @@ def get_bot_status() -> dict:
 
 def main() -> None:
     """CLI entry point: init DB, create bot, run."""
+    from .config import init as config_init
+    config_init()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",

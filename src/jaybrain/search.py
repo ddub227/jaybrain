@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 from pathlib import Path
@@ -25,11 +26,30 @@ logger = logging.getLogger(__name__)
 _tokenizer = None
 _ort_session = None
 
+# Expected SHA-256 of the ONNX model binary (all-MiniLM-L6-v2).
+# Update this hash if upgrading to a new model version.
+_ONNX_MODEL_SHA256 = "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452"
+
+
+def _verify_model_hash(model_path: Path) -> None:
+    """Verify the ONNX model file matches the expected SHA-256 hash."""
+    sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    if sha256 != _ONNX_MODEL_SHA256:
+        raise RuntimeError(
+            f"ONNX model integrity check failed.\n"
+            f"Expected SHA-256: {_ONNX_MODEL_SHA256}\n"
+            f"Got:              {sha256}\n"
+            f"The model file at {model_path} may be corrupted or tampered with. "
+            f"Delete it and restart to re-download, or update _ONNX_MODEL_SHA256 "
+            f"in search.py if you intentionally upgraded the model."
+        )
+
 
 def _ensure_model_downloaded() -> Path:
-    """Download the ONNX model if not already present."""
+    """Download the ONNX model if not already present, with integrity check."""
     model_path = MODELS_DIR / "model.onnx"
     if model_path.exists():
+        _verify_model_hash(model_path)
         return model_path
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -44,7 +64,8 @@ def _ensure_model_downloaded() -> Path:
         for chunk in response.iter_content(chunk_size=8192):
             f.write(chunk)
 
-    print("Embedding model downloaded.", file=sys.stderr)
+    _verify_model_hash(model_path)
+    print("Embedding model downloaded and verified.", file=sys.stderr)
     return model_path
 
 

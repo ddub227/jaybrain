@@ -80,7 +80,7 @@ def dispatch_notification(check_name: str, message: str) -> bool:
 
     try:
         from .telegram import send_telegram_message
-        send_telegram_message(message)
+        send_telegram_message(message, caller=f"heartbeat_{check_name}")
         _log_check(check_name, True, message, True)
         return True
     except Exception as e:
@@ -344,6 +344,9 @@ def check_stale_applications() -> dict:
 
 def check_session_crash() -> dict:
     """Detect stalled Claude Code sessions (active but no heartbeat >30 min)."""
+    from .config import HEARTBEAT_SESSION_CRASH_ENABLED
+    if not HEARTBEAT_SESSION_CRASH_ENABLED:
+        return {"triggered": False, "disabled": True}
     check_name = "session_crash"
     ensure_data_dirs()
 

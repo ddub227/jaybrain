@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Optional
 
 from .db import (
+    fts5_safe_query,
     get_connection,
     get_job_posting,
     insert_job_posting,
@@ -27,16 +28,6 @@ logger = logging.getLogger(__name__)
 def _generate_id() -> str:
     return uuid.uuid4().hex[:12]
 
-
-def _fts5_safe_query(query: str) -> str:
-    """Convert a natural language query into a safe FTS5 query."""
-    words = query.split()
-    safe_words = []
-    for word in words:
-        cleaned = "".join(c for c in word if c.isalnum() or c == "_")
-        if cleaned:
-            safe_words.append(f'"{cleaned}"')
-    return " ".join(safe_words)
 
 
 def _parse_posting_row(row) -> JobPosting:
@@ -114,7 +105,7 @@ def search_jobs(
     conn = get_connection()
     try:
         if query:
-            safe_query = _fts5_safe_query(query)
+            safe_query = fts5_safe_query(query)
             if safe_query:
                 fts_results = search_job_postings_fts(conn, safe_query, limit)
                 postings = []

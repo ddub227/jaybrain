@@ -103,6 +103,24 @@ def _write_handoff_markdown(session: Session) -> None:
     filepath.write_text(content, encoding="utf-8")
 
 
+def _write_vault_session_note(row) -> None:
+    """Write a session note directly to the Obsidian vault.
+
+    Called immediately at session_end so the note appears without waiting
+    for the next daemon sync tick.
+    """
+    from .config import VAULT_PATH, VAULT_SYNC_ENABLED
+    if not VAULT_SYNC_ENABLED:
+        return
+
+    from .vault_sync import _convert_session, _sha256
+    rel_path, content = _convert_session(row)
+    full_path = VAULT_PATH / rel_path
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    full_path.write_text(content, encoding="utf-8")
+    logger.info("Wrote vault session note: %s", rel_path)
+
+
 def _build_recovery_summary(conn, session_id: str, started_at: str) -> tuple[str, list[str], list[str]]:
     """Build the best possible summary for an orphaned session.
 
@@ -300,6 +318,12 @@ def end_current_session(
             _write_handoff_markdown(session)
         except Exception as e:
             logger.warning("Failed to write handoff file: %s", e)
+
+        # Write session note to Obsidian vault immediately
+        try:
+            _write_vault_session_note(row)
+        except Exception as e:
+            logger.warning("Failed to write vault session note: %s", e)
 
         return session
     finally:

@@ -190,7 +190,7 @@ def auto_fetch_boards() -> dict:
                 lines.append(f"  - {name}")
             if len(changed_boards) > 10:
                 lines.append(f"  ... and {len(changed_boards) - 10} more")
-            send_telegram_message("\n".join(lines))
+            send_telegram_message("\n".join(lines), caller="daemon_job_board_fetch")
         except Exception as e:
             logger.error("Failed to send job board change notification: %s", e)
 

@@ -23,7 +23,6 @@ import requests
 from .config import (
     NEWS_FEED_HTTP_TIMEOUT,
     NEWS_FEED_MAX_ITEMS_PER_SOURCE,
-    NEWS_FEED_NOTIFY_THRESHOLD,
     SCRAPE_USER_AGENT,
     ensure_data_dirs,
 )
@@ -661,24 +660,6 @@ def run_news_feed_poll() -> dict:
             )
         finally:
             conn.close()
-
-    # Telegram notification
-    if total_new >= NEWS_FEED_NOTIFY_THRESHOLD:
-        try:
-            lines = [
-                f"News feeds: {total_new} new article"
-                f"{'s' if total_new != 1 else ''}"
-            ]
-            for r in results:
-                if r.get("new", 0) > 0:
-                    lines.append(f"  - {r['source']}: {r['new']} new")
-            from .telegram import send_telegram_message
-
-            send_telegram_message(
-                "\n".join(lines), caller="daemon_news_feed"
-            )
-        except Exception:
-            pass  # Notification failure must not break the job
 
     return {
         "status": "ok",

@@ -566,8 +566,7 @@ class TestRunPoll:
         from jaybrain.news_feeds import run_news_feed_poll, _DEFAULT_SOURCES
 
         with patch("jaybrain.news_feeds._fetch_source", return_value=[]):
-            with patch("jaybrain.telegram.send_telegram_message"):
-                result = run_news_feed_poll()
+            result = run_news_feed_poll()
 
         assert result["status"] == "ok"
         assert result["sources_polled"] == len(_DEFAULT_SOURCES)
@@ -582,13 +581,13 @@ class TestRunPoll:
 
         assert result["status"] == "skipped"
 
-    def test_telegram_notification(self, temp_data_dir):
+    def test_poll_returns_new_count(self, temp_data_dir):
         _setup_db(temp_data_dir)
         from jaybrain.news_feeds import run_news_feed_poll
 
         articles = [
             {
-                "source_article_id": "notif-1",
+                "source_article_id": "poll-1",
                 "title": "Breaking News",
                 "url": "https://example.com/breaking",
                 "summary": "Big news.",
@@ -600,13 +599,9 @@ class TestRunPoll:
         ]
 
         with patch("jaybrain.news_feeds._fetch_source", return_value=articles):
-            with patch("jaybrain.telegram.send_telegram_message") as mock_tg:
-                result = run_news_feed_poll()
+            result = run_news_feed_poll()
 
         assert result["total_new"] > 0
-        mock_tg.assert_called_once()
-        call_args = mock_tg.call_args
-        assert "new article" in call_args[0][0].lower()
 
 
 # =============================================================================
@@ -643,8 +638,7 @@ class TestStatus:
         ]
 
         with patch("jaybrain.news_feeds._fetch_source", return_value=articles):
-            with patch("jaybrain.telegram.send_telegram_message"):
-                run_news_feed_poll()
+            run_news_feed_poll()
 
         status = get_news_feed_status()
         assert status["total_articles"] > 0

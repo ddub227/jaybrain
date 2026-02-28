@@ -62,6 +62,10 @@ _UPDATABLE_COLUMNS: dict[str, frozenset[str]] = {
         "fetch_status", "fetch_error", "fetched_at", "expires_at",
         "updated_at",
     }),
+    "signalforge_clusters": frozenset({
+        "label", "article_count", "source_count", "avg_similarity",
+        "significance", "updated_at",
+    }),
 }
 
 
@@ -674,6 +678,38 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 ON signalforge_articles(expires_at);
         """)
         _set_schema_version(conn, 19, "Add signalforge_articles table for full-text fetch tracking")
+        conn.commit()
+
+    # --- Migration 20: SignalForge story clusters ---
+    if current < 20:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS signalforge_clusters (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL DEFAULT '',
+                article_count INTEGER NOT NULL DEFAULT 0,
+                source_count INTEGER NOT NULL DEFAULT 0,
+                avg_similarity REAL NOT NULL DEFAULT 0.0,
+                significance REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_signalforge_clusters_significance
+                ON signalforge_clusters(significance DESC);
+            CREATE INDEX IF NOT EXISTS idx_signalforge_clusters_created
+                ON signalforge_clusters(created_at);
+
+            CREATE TABLE IF NOT EXISTS signalforge_cluster_articles (
+                cluster_id TEXT NOT NULL,
+                knowledge_id TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (cluster_id, knowledge_id),
+                FOREIGN KEY (cluster_id) REFERENCES signalforge_clusters(id) ON DELETE CASCADE,
+                FOREIGN KEY (knowledge_id) REFERENCES knowledge(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_signalforge_ca_knowledge
+                ON signalforge_cluster_articles(knowledge_id);
+        """)
+        _set_schema_version(conn, 20, "Add signalforge_clusters and cluster_articles tables")
         conn.commit()
 
 
@@ -2175,6 +2211,91 @@ def count_signalforge_by_status(
         "GROUP BY fetch_status"
     ).fetchall()
     return {row["fetch_status"]: row["cnt"] for row in rows}
+
+
+# --- SignalForge Cluster CRUD ---
+
+def insert_signalforge_cluster(
+    conn: sqlite3.Connection,
+    cluster_id: str,
+    label: str,
+    article_count: int,
+    source_count: int,
+    avg_similarity: float,
+    significance: float,
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO signalforge_clusters
+        (id, label, article_count, source_count, avg_similarity,
+         significance, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (cluster_id, label, article_count, source_count,
+         avg_similarity, significance, now, now),
+    )
+    conn.commit()
+
+
+def get_signalforge_cluster(
+    conn: sqlite3.Connection, cluster_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM signalforge_clusters WHERE id = ?", (cluster_id,)
+    ).fetchone()
+
+
+def list_signalforge_clusters(
+    conn: sqlite3.Connection, limit: int = 20, min_significance: float = 0.0
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM signalforge_clusters "
+        "WHERE significance >= ? "
+        "ORDER BY significance DESC LIMIT ?",
+        (min_significance, limit),
+    ).fetchall()
+
+
+def update_signalforge_cluster(
+    conn: sqlite3.Connection, cluster_id: str, **fields
+) -> bool:
+    if not fields:
+        return False
+    _validate_fields("signalforge_clusters", fields)
+    fields["updated_at"] = now_iso()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [cluster_id]
+    cursor = conn.execute(
+        f"UPDATE signalforge_clusters SET {set_clause} WHERE id = ?",  # nosec B608
+        values,
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def insert_cluster_article(
+    conn: sqlite3.Connection, cluster_id: str, knowledge_id: str
+) -> None:
+    conn.execute(
+        """INSERT OR IGNORE INTO signalforge_cluster_articles
+        (cluster_id, knowledge_id, added_at)
+        VALUES (?, ?, ?)""",
+        (cluster_id, knowledge_id, now_iso()),
+    )
+    conn.commit()
+
+
+def get_cluster_articles(
+    conn: sqlite3.Connection, cluster_id: str
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT k.id, k.title, k.source, k.created_at,
+                  ca.added_at
+           FROM signalforge_cluster_articles ca
+           JOIN knowledge k ON k.id = ca.knowledge_id
+           WHERE ca.cluster_id = ?
+           ORDER BY k.created_at""",
+        (cluster_id,),
+    ).fetchall()
 
 
 # --- Job Posting CRUD ---

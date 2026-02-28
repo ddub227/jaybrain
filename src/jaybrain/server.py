@@ -3590,6 +3590,52 @@ def signalforge_read(knowledge_id: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+@mcp.tool()
+def signalforge_clusters(limit: int = 20, min_significance: float = 0.0) -> str:
+    """List story clusters ranked by significance.
+
+    Groups of related articles from different sources about the same story.
+    limit: Max clusters to return (default 20).
+    min_significance: Only show clusters above this score (default 0.0).
+    """
+    from .signalforge import get_clustering_status
+
+    try:
+        result = get_clustering_status()
+        # If min_significance filter, re-query
+        if min_significance > 0:
+            result["top_clusters"] = [
+                c for c in result["top_clusters"]
+                if c["significance"] >= min_significance
+            ]
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error("signalforge_clusters failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def signalforge_cluster_detail(cluster_id: str) -> str:
+    """Get full details for a story cluster including all articles.
+
+    cluster_id: The cluster ID to inspect.
+    Returns cluster metadata and list of all articles in the cluster.
+    """
+    from .signalforge import get_cluster_detail
+
+    try:
+        result = get_cluster_detail(cluster_id)
+        if result is None:
+            return json.dumps({
+                "status": "not_found",
+                "error": f"Cluster {cluster_id} not found",
+            })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error("signalforge_cluster_detail failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
 # =============================================================================
 # Personality Tools (1)
 # =============================================================================

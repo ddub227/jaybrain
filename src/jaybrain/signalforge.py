@@ -1,4 +1,4 @@
-"""SignalForge — Full-text article fetching, storage, and lifecycle management.
+"""SignalForge — Article intelligence engine: fetching, clustering, and lifecycle.
 
 Tier 1 of the three-tier article lifecycle:
   - Tier 1 (30-day TTL): Full article text as .txt files in data/articles/
@@ -13,10 +13,12 @@ import random
 import re
 import time
 import uuid
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import requests
 
 from .config import (
@@ -24,17 +26,26 @@ from .config import (
     SIGNALFORGE_ARTICLE_TTL_DAYS,
     SIGNALFORGE_ARTICLES_DIR,
     SIGNALFORGE_BACKOFF_MAX,
+    SIGNALFORGE_CLUSTER_MAX_SIZE,
+    SIGNALFORGE_CLUSTER_SIMILARITY,
+    SIGNALFORGE_CLUSTER_WINDOW_DAYS,
     SIGNALFORGE_FETCH_BATCH_SIZE,
     SIGNALFORGE_FETCH_DELAY_BASE,
     SIGNALFORGE_FETCH_DELAY_JITTER,
     SIGNALFORGE_MAX_ARTICLE_CHARS,
 )
 from .db import (
+    _deserialize_f32,
     count_signalforge_by_status,
+    get_cluster_articles,
     get_connection,
     get_signalforge_article_by_knowledge_id,
+    get_signalforge_cluster,
     init_db,
+    insert_cluster_article,
     insert_signalforge_article,
+    insert_signalforge_cluster,
+    list_signalforge_clusters,
     list_signalforge_expired,
     list_signalforge_pending,
     now_iso,
@@ -633,6 +644,322 @@ def run_signalforge_cleanup() -> dict:
     }
     logger.info("SignalForge cleanup complete: %s", summary)
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Story Clustering
+# ---------------------------------------------------------------------------
+
+
+def _get_clusterable_articles(
+    conn, window_days: int = SIGNALFORGE_CLUSTER_WINDOW_DAYS,
+) -> list[tuple[str, list[float]]]:
+    """Get fetched articles with embeddings from the last N days.
+
+    Returns list of (knowledge_id, embedding_vector) tuples.
+    """
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=window_days)
+    ).isoformat()
+    rows = conn.execute(
+        """SELECT sa.knowledge_id, kv.embedding
+        FROM signalforge_articles sa
+        JOIN knowledge_vec kv ON kv.id = sa.knowledge_id
+        WHERE sa.fetch_status = 'fetched'
+          AND sa.created_at >= ?""",
+        (cutoff,),
+    ).fetchall()
+
+    items = []
+    for row in rows:
+        try:
+            vec = _deserialize_f32(row["embedding"])
+            items.append((row["knowledge_id"], vec))
+        except Exception:
+            continue
+    return items
+
+
+def _build_clusters(
+    items: list[tuple[str, list[float]]],
+    threshold: float = SIGNALFORGE_CLUSTER_SIMILARITY,
+    max_size: int = SIGNALFORGE_CLUSTER_MAX_SIZE,
+) -> list[dict]:
+    """Build story clusters using cosine similarity + BFS connected components.
+
+    Adapted from consolidation.py's proven clustering algorithm.
+
+    Returns list of dicts with: knowledge_ids, avg_similarity
+    """
+    if len(items) < 2:
+        return []
+
+    ids = [item[0] for item in items]
+    vectors = [item[1] for item in items]
+
+    # Pairwise cosine similarity via numpy
+    matrix = np.array(vectors, dtype=np.float32)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-9)
+    normalized = matrix / norms
+    sim_matrix = normalized @ normalized.T
+
+    # Build adjacency list from pairs above threshold
+    n = len(ids)
+    adjacency: dict[int, set[int]] = defaultdict(set)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if sim_matrix[i, j] >= threshold:
+                adjacency[i].add(j)
+                adjacency[j].add(i)
+
+    # BFS connected components
+    visited: set[int] = set()
+    components: list[list[int]] = []
+    for start in range(n):
+        if start in visited or start not in adjacency:
+            continue
+        component: list[int] = []
+        queue = [start]
+        while queue:
+            node = queue.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+            component.append(node)
+            for neighbor in adjacency[node]:
+                if neighbor not in visited:
+                    queue.append(neighbor)
+        if len(component) >= 2:
+            components.append(component[:max_size])
+
+    # Build output with avg similarity per cluster
+    clusters = []
+    for comp in components:
+        cluster_ids = [ids[idx] for idx in comp]
+        # Average pairwise similarity within cluster
+        sims = []
+        for i_idx in range(len(comp)):
+            for j_idx in range(i_idx + 1, len(comp)):
+                sims.append(float(sim_matrix[comp[i_idx], comp[j_idx]]))
+        avg_sim = sum(sims) / len(sims) if sims else 0.0
+
+        clusters.append({
+            "knowledge_ids": cluster_ids,
+            "avg_similarity": round(avg_sim, 4),
+        })
+
+    return clusters
+
+
+def _compute_significance(
+    article_count: int, avg_similarity: float, source_count: int
+) -> float:
+    """Compute story significance score.
+
+    More articles from more sources with higher similarity = more significant.
+    """
+    return round(article_count * avg_similarity * source_count, 4)
+
+
+def _generate_cluster_label(conn, knowledge_ids: list[str]) -> str:
+    """Pick a representative label for a cluster from article titles.
+
+    Uses the shortest title as it tends to be the most headline-like.
+    """
+    placeholders = ", ".join("?" for _ in knowledge_ids)
+    rows = conn.execute(
+        f"SELECT title FROM knowledge WHERE id IN ({placeholders})",  # nosec B608
+        knowledge_ids,
+    ).fetchall()
+    titles = [r["title"] for r in rows if r["title"]]
+    if not titles:
+        return "Untitled cluster"
+    # Shortest title is usually the most concise headline
+    return min(titles, key=len)
+
+
+def _count_distinct_sources(conn, knowledge_ids: list[str]) -> int:
+    """Count how many distinct news feed sources contributed to a cluster."""
+    placeholders = ", ".join("?" for _ in knowledge_ids)
+    row = conn.execute(
+        f"""SELECT COUNT(DISTINCT nfa.source_id) as cnt
+        FROM news_feed_articles nfa
+        WHERE nfa.knowledge_id IN ({placeholders})""",  # nosec B608
+        knowledge_ids,
+    ).fetchone()
+    return row["cnt"] if row else 1
+
+
+def run_signalforge_clustering() -> dict:
+    """Daemon entry point: cluster related articles into stories.
+
+    Clears old clusters and rebuilds from scratch using articles
+    from the last SIGNALFORGE_CLUSTER_WINDOW_DAYS days.
+    """
+    init_db()
+    conn = get_connection()
+    try:
+        # Get articles with embeddings
+        items = _get_clusterable_articles(conn, SIGNALFORGE_CLUSTER_WINDOW_DAYS)
+        if len(items) < 2:
+            logger.info("SignalForge clustering: fewer than 2 articles, skipping")
+            return {"clusters_found": 0, "articles_clustered": 0, "avg_size": 0}
+
+        # Build clusters
+        raw_clusters = _build_clusters(
+            items, SIGNALFORGE_CLUSTER_SIMILARITY, SIGNALFORGE_CLUSTER_MAX_SIZE,
+        )
+        if not raw_clusters:
+            logger.info("SignalForge clustering: no clusters found above threshold")
+            return {"clusters_found": 0, "articles_clustered": 0, "avg_size": 0}
+
+        # Clear old clusters before inserting new ones
+        old_cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(days=SIGNALFORGE_CLUSTER_WINDOW_DAYS)
+        ).isoformat()
+        old_clusters = conn.execute(
+            "SELECT id FROM signalforge_clusters WHERE created_at < ?",
+            (old_cutoff,),
+        ).fetchall()
+        if old_clusters:
+            old_ids = [r["id"] for r in old_clusters]
+            placeholders = ", ".join("?" for _ in old_ids)
+            conn.execute(
+                f"DELETE FROM signalforge_cluster_articles WHERE cluster_id IN ({placeholders})",  # nosec B608
+                old_ids,
+            )
+            conn.execute(
+                f"DELETE FROM signalforge_clusters WHERE id IN ({placeholders})",  # nosec B608
+                old_ids,
+            )
+            conn.commit()
+            logger.info(
+                "SignalForge clustering: cleaned %d old clusters", len(old_ids)
+            )
+
+        # Also clear current clusters to rebuild fresh
+        conn.execute("DELETE FROM signalforge_cluster_articles")
+        conn.execute("DELETE FROM signalforge_clusters")
+        conn.commit()
+
+        # Insert new clusters
+        total_articles = 0
+        for cluster_data in raw_clusters:
+            kid_list = cluster_data["knowledge_ids"]
+            avg_sim = cluster_data["avg_similarity"]
+
+            label = _generate_cluster_label(conn, kid_list)
+            source_count = _count_distinct_sources(conn, kid_list)
+            significance = _compute_significance(
+                len(kid_list), avg_sim, source_count,
+            )
+
+            cluster_id = uuid.uuid4().hex[:12]
+            insert_signalforge_cluster(
+                conn, cluster_id, label,
+                article_count=len(kid_list),
+                source_count=source_count,
+                avg_similarity=avg_sim,
+                significance=significance,
+            )
+
+            for kid in kid_list:
+                insert_cluster_article(conn, cluster_id, kid)
+
+            total_articles += len(kid_list)
+
+        avg_size = round(total_articles / len(raw_clusters), 1) if raw_clusters else 0
+
+        summary = {
+            "clusters_found": len(raw_clusters),
+            "articles_clustered": total_articles,
+            "avg_size": avg_size,
+        }
+        logger.info("SignalForge clustering complete: %s", summary)
+        return summary
+    finally:
+        conn.close()
+
+
+def get_cluster_detail(cluster_id: str) -> Optional[dict]:
+    """Get full details for a story cluster including all articles."""
+    init_db()
+    conn = get_connection()
+    try:
+        cluster = get_signalforge_cluster(conn, cluster_id)
+        if not cluster:
+            return None
+
+        articles = get_cluster_articles(conn, cluster_id)
+        article_list = [
+            {
+                "knowledge_id": a["id"],
+                "title": a["title"],
+                "source": a["source"],
+                "created_at": a["created_at"],
+            }
+            for a in articles
+        ]
+
+        return {
+            "cluster_id": cluster["id"],
+            "label": cluster["label"],
+            "article_count": cluster["article_count"],
+            "source_count": cluster["source_count"],
+            "avg_similarity": cluster["avg_similarity"],
+            "significance": cluster["significance"],
+            "created_at": cluster["created_at"],
+            "articles": article_list,
+        }
+    finally:
+        conn.close()
+
+
+def get_clustering_status() -> dict:
+    """Get story clustering dashboard data."""
+    init_db()
+    conn = get_connection()
+    try:
+        clusters = list_signalforge_clusters(conn, limit=100)
+        total_clusters = len(clusters)
+
+        total_articles = sum(c["article_count"] for c in clusters)
+        avg_size = round(total_articles / total_clusters, 1) if total_clusters else 0
+
+        # Top clusters by significance
+        top = [
+            {
+                "cluster_id": c["id"],
+                "label": c["label"],
+                "article_count": c["article_count"],
+                "source_count": c["source_count"],
+                "significance": c["significance"],
+            }
+            for c in clusters[:10]
+        ]
+
+        # Unclustered fetched articles
+        total_fetched = conn.execute(
+            "SELECT COUNT(*) as cnt FROM signalforge_articles "
+            "WHERE fetch_status = 'fetched'"
+        ).fetchone()["cnt"]
+        clustered_ids = conn.execute(
+            "SELECT COUNT(DISTINCT knowledge_id) as cnt "
+            "FROM signalforge_cluster_articles"
+        ).fetchone()["cnt"]
+        unclustered = total_fetched - clustered_ids
+
+        return {
+            "total_clusters": total_clusters,
+            "total_articles_clustered": total_articles,
+            "avg_cluster_size": avg_size,
+            "unclustered_articles": unclustered,
+            "top_clusters": top,
+        }
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

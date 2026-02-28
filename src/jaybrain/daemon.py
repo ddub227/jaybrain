@@ -779,6 +779,20 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register signalforge_cleanup module", exc_info=True)
 
+    # Phase: SignalForge clustering (every N hours)
+    try:
+        from .signalforge import run_signalforge_clustering
+        from .config import SIGNALFORGE_CLUSTER_INTERVAL_HOURS
+
+        dm.register_module(
+            "signalforge_clustering",
+            run_signalforge_clustering,
+            IntervalTrigger(hours=SIGNALFORGE_CLUSTER_INTERVAL_HOURS),
+            "Cluster related SignalForge articles into stories",
+        )
+    except Exception:
+        logger.error("Failed to register signalforge_clustering module", exc_info=True)
+
     # Post-registration audit: log how many modules registered and warn if low
     expected_modules = {
         "conversation_archive", "daily_briefing", "life_domains_sync",
@@ -788,7 +802,7 @@ def build_daemon() -> DaemonManager:
         "event_discovery", "job_board_autofetch", "vault_sync",
         "trash_auto_cleanup", "trash_sweep", "git_shadow",
         "feedly_monitor", "news_feed_poll",
-        "signalforge_fetch", "signalforge_cleanup",
+        "signalforge_fetch", "signalforge_cleanup", "signalforge_clustering",
     }
     registered = set(dm.modules)
     missing = expected_modules - registered

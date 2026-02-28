@@ -1,4 +1,4 @@
-"""Tests for SignalForge full-text article fetching and lifecycle."""
+"""Tests for SignalForge: article fetching, lifecycle, and story clustering."""
 
 from __future__ import annotations
 
@@ -8,15 +8,22 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from jaybrain.config import SIGNALFORGE_MAX_ARTICLE_CHARS
 from jaybrain.db import (
+    _serialize_f32,
     get_connection,
     init_db,
     insert_signalforge_article,
     get_signalforge_article,
     get_signalforge_article_by_knowledge_id,
+    get_signalforge_cluster,
+    get_cluster_articles,
+    insert_signalforge_cluster,
+    insert_cluster_article,
+    list_signalforge_clusters,
     list_signalforge_pending,
     list_signalforge_expired,
     update_signalforge_article,
@@ -40,13 +47,20 @@ def _setup_db(temp_data_dir):
     return get_connection()
 
 
-def _insert_knowledge_row(conn, kid, title="Test Article", url="https://example.com/article"):
-    """Insert a knowledge row for FK references."""
+def _insert_knowledge_row(conn, kid, title="Test Article", url="https://example.com/article",
+                          embedding=None):
+    """Insert a knowledge row (+ vec embedding) for FK references."""
     now = now_iso()
     conn.execute(
         "INSERT INTO knowledge (id, title, content, category, tags, source, created_at, updated_at) "
         "VALUES (?, ?, ?, 'news_feed', '[]', ?, ?, ?)",
         (kid, title, f"Summary of {title}", url, now, now),
+    )
+    # Also insert embedding into knowledge_vec
+    vec = embedding if embedding is not None else FAKE_EMBEDDING
+    conn.execute(
+        "INSERT INTO knowledge_vec (id, embedding) VALUES (?, ?)",
+        (kid, _serialize_f32(vec)),
     )
     conn.commit()
 
@@ -752,3 +766,413 @@ class TestSignalforgeDb:
         assert len(expired) == 1
         assert expired[0]["id"] == "sf_expired"
         conn.close()
+
+
+# =============================================================================
+# Cluster DB CRUD
+# =============================================================================
+
+
+class TestClusterDb:
+    def test_insert_and_get_cluster(self, temp_data_dir):
+        conn = _setup_db(temp_data_dir)
+        insert_signalforge_cluster(
+            conn, "cl1", "Test Cluster", article_count=3,
+            source_count=2, avg_similarity=0.85, significance=5.1,
+        )
+        row = get_signalforge_cluster(conn, "cl1")
+        assert row is not None
+        assert row["label"] == "Test Cluster"
+        assert row["article_count"] == 3
+        assert row["significance"] == 5.1
+        conn.close()
+
+    def test_list_clusters_by_significance(self, temp_data_dir):
+        conn = _setup_db(temp_data_dir)
+        insert_signalforge_cluster(
+            conn, "cl_low", "Low", article_count=2,
+            source_count=1, avg_similarity=0.75, significance=1.5,
+        )
+        insert_signalforge_cluster(
+            conn, "cl_high", "High", article_count=5,
+            source_count=3, avg_similarity=0.90, significance=13.5,
+        )
+        clusters = list_signalforge_clusters(conn, limit=10)
+        assert len(clusters) == 2
+        assert clusters[0]["id"] == "cl_high"  # highest first
+        conn.close()
+
+    def test_list_clusters_min_significance(self, temp_data_dir):
+        conn = _setup_db(temp_data_dir)
+        insert_signalforge_cluster(
+            conn, "cl_a", "A", article_count=2,
+            source_count=1, avg_similarity=0.75, significance=1.0,
+        )
+        insert_signalforge_cluster(
+            conn, "cl_b", "B", article_count=5,
+            source_count=3, avg_similarity=0.90, significance=10.0,
+        )
+        clusters = list_signalforge_clusters(conn, min_significance=5.0)
+        assert len(clusters) == 1
+        assert clusters[0]["id"] == "cl_b"
+        conn.close()
+
+    def test_insert_cluster_article_junction(self, temp_data_dir):
+        conn = _setup_db(temp_data_dir)
+        kid = "junc_kid"
+        _insert_knowledge_row(conn, kid)
+        insert_signalforge_cluster(
+            conn, "cl_j", "Junction Test", article_count=1,
+            source_count=1, avg_similarity=0.80, significance=0.8,
+        )
+        insert_cluster_article(conn, "cl_j", kid)
+        articles = get_cluster_articles(conn, "cl_j")
+        assert len(articles) == 1
+        assert articles[0]["id"] == kid
+        conn.close()
+
+    def test_insert_cluster_article_no_dupes(self, temp_data_dir):
+        conn = _setup_db(temp_data_dir)
+        kid = "dupe_kid"
+        _insert_knowledge_row(conn, kid)
+        insert_signalforge_cluster(
+            conn, "cl_d", "Dupe Test", article_count=1,
+            source_count=1, avg_similarity=0.80, significance=0.8,
+        )
+        insert_cluster_article(conn, "cl_d", kid)
+        insert_cluster_article(conn, "cl_d", kid)  # INSERT OR IGNORE
+        articles = get_cluster_articles(conn, "cl_d")
+        assert len(articles) == 1
+        conn.close()
+
+
+# =============================================================================
+# Build Clusters Algorithm
+# =============================================================================
+
+
+def _make_similar_vectors(n, base=None):
+    """Create n vectors that are similar to each other (cosine > 0.9)."""
+    rng = np.random.RandomState(42)
+    if base is None:
+        base = rng.randn(384).astype(np.float32)
+    base = base / np.linalg.norm(base)
+    vectors = []
+    for _ in range(n):
+        noise = rng.randn(384).astype(np.float32) * 0.01
+        vec = base + noise
+        vec = vec / np.linalg.norm(vec)
+        vectors.append(vec.tolist())
+    return vectors
+
+
+def _make_distinct_vectors(n):
+    """Create n vectors that are dissimilar (near-orthogonal)."""
+    rng = np.random.RandomState(123)
+    vectors = []
+    for _ in range(n):
+        vec = rng.randn(384).astype(np.float32)
+        vec = vec / np.linalg.norm(vec)
+        vectors.append(vec.tolist())
+    return vectors
+
+
+class TestBuildClusters:
+    def test_groups_similar(self):
+        from jaybrain.signalforge import _build_clusters
+
+        # 3 similar articles + 1 distinct
+        similar = _make_similar_vectors(3)
+        distinct = _make_distinct_vectors(1)
+        items = [
+            ("a1", similar[0]),
+            ("a2", similar[1]),
+            ("a3", similar[2]),
+            ("b1", distinct[0]),
+        ]
+        clusters = _build_clusters(items, threshold=0.72)
+        assert len(clusters) == 1
+        assert set(clusters[0]["knowledge_ids"]) == {"a1", "a2", "a3"}
+        assert clusters[0]["avg_similarity"] > 0.9
+
+    def test_two_groups(self):
+        from jaybrain.signalforge import _build_clusters
+
+        rng = np.random.RandomState(42)
+        base_a = rng.randn(384).astype(np.float32)
+        base_b = rng.randn(384).astype(np.float32)
+        group_a = _make_similar_vectors(2, base=base_a)
+        group_b = _make_similar_vectors(2, base=base_b)
+        items = [
+            ("a1", group_a[0]), ("a2", group_a[1]),
+            ("b1", group_b[0]), ("b2", group_b[1]),
+        ]
+        clusters = _build_clusters(items, threshold=0.72)
+        assert len(clusters) == 2
+
+    def test_respects_threshold(self):
+        from jaybrain.signalforge import _build_clusters
+
+        distinct = _make_distinct_vectors(5)
+        items = [(f"d{i}", distinct[i]) for i in range(5)]
+        clusters = _build_clusters(items, threshold=0.99)
+        assert len(clusters) == 0
+
+    def test_caps_max_size(self):
+        from jaybrain.signalforge import _build_clusters
+
+        similar = _make_similar_vectors(10)
+        items = [(f"s{i}", similar[i]) for i in range(10)]
+        clusters = _build_clusters(items, threshold=0.72, max_size=3)
+        assert len(clusters) >= 1
+        for c in clusters:
+            assert len(c["knowledge_ids"]) <= 3
+
+    def test_fewer_than_two_returns_empty(self):
+        from jaybrain.signalforge import _build_clusters
+
+        items = [("a1", [0.1] * 384)]
+        assert _build_clusters(items) == []
+        assert _build_clusters([]) == []
+
+
+# =============================================================================
+# Compute Significance
+# =============================================================================
+
+
+class TestComputeSignificance:
+    def test_basic(self):
+        from jaybrain.signalforge import _compute_significance
+
+        # 3 articles, 0.85 similarity, 2 sources = 3 * 0.85 * 2 = 5.1
+        result = _compute_significance(3, 0.85, 2)
+        assert result == 5.1
+
+    def test_single_source(self):
+        from jaybrain.signalforge import _compute_significance
+
+        result = _compute_significance(2, 0.90, 1)
+        assert result == 1.8
+
+
+# =============================================================================
+# Generate Cluster Label
+# =============================================================================
+
+
+class TestGenerateClusterLabel:
+    def test_picks_shortest_title(self, temp_data_dir):
+        from jaybrain.signalforge import _generate_cluster_label
+
+        conn = _setup_db(temp_data_dir)
+        _insert_knowledge_row(conn, "lbl1", title="Short Title")
+        _insert_knowledge_row(conn, "lbl2", title="A Much Longer Article Title Here")
+        label = _generate_cluster_label(conn, ["lbl1", "lbl2"])
+        assert label == "Short Title"
+        conn.close()
+
+    def test_no_titles(self, temp_data_dir):
+        from jaybrain.signalforge import _generate_cluster_label
+
+        conn = _setup_db(temp_data_dir)
+        _insert_knowledge_row(conn, "lbl_e", title="")
+        label = _generate_cluster_label(conn, ["lbl_e"])
+        assert label == "Untitled cluster"
+        conn.close()
+
+
+# =============================================================================
+# Get Clusterable Articles
+# =============================================================================
+
+
+class TestGetClusterableArticles:
+    def test_returns_fetched_with_embeddings(self, temp_data_dir):
+        from jaybrain.signalforge import _get_clusterable_articles
+
+        conn = _setup_db(temp_data_dir)
+        kid = "cla_kid1"
+        _insert_knowledge_row(conn, kid)
+        insert_signalforge_article(conn, "sf_cla1", kid)
+        update_signalforge_article(conn, "sf_cla1", fetch_status="fetched")
+
+        items = _get_clusterable_articles(conn, window_days=7)
+        assert len(items) == 1
+        assert items[0][0] == kid
+        assert len(items[0][1]) == 384
+        conn.close()
+
+    def test_excludes_pending(self, temp_data_dir):
+        from jaybrain.signalforge import _get_clusterable_articles
+
+        conn = _setup_db(temp_data_dir)
+        kid = "cla_pending"
+        _insert_knowledge_row(conn, kid)
+        insert_signalforge_article(conn, "sf_cla_p", kid)
+        # status stays pending
+
+        items = _get_clusterable_articles(conn, window_days=7)
+        assert len(items) == 0
+        conn.close()
+
+    def test_filters_by_window(self, temp_data_dir):
+        from jaybrain.signalforge import _get_clusterable_articles
+
+        conn = _setup_db(temp_data_dir)
+        kid = "cla_old"
+        _insert_knowledge_row(conn, kid)
+        # Insert with old created_at
+        old_date = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        conn.execute(
+            "INSERT INTO signalforge_articles (id, knowledge_id, fetch_status, created_at, updated_at) "
+            "VALUES (?, ?, 'fetched', ?, ?)",
+            ("sf_cla_old", kid, old_date, old_date),
+        )
+        conn.commit()
+
+        items = _get_clusterable_articles(conn, window_days=3)
+        assert len(items) == 0
+        conn.close()
+
+
+# =============================================================================
+# Run Clustering (Daemon Entry Point)
+# =============================================================================
+
+
+class TestRunClustering:
+    def _setup_cluster_articles(self, conn, count, similar=True):
+        """Insert N articles with similar or distinct embeddings."""
+        if similar:
+            vecs = _make_similar_vectors(count)
+        else:
+            vecs = _make_distinct_vectors(count)
+
+        kids = []
+        for i in range(count):
+            kid = f"cluster_kid_{i}"
+            _insert_knowledge_row(conn, kid, title=f"Article {i}", embedding=vecs[i])
+            _insert_news_feed_article(conn, kid, url=f"https://example.com/a{i}",
+                                       source_id=f"src_c{i % 3}")
+            insert_signalforge_article(conn, f"sf_cl_{i}", kid)
+            update_signalforge_article(conn, f"sf_cl_{i}", fetch_status="fetched")
+            kids.append(kid)
+        return kids
+
+    def test_happy_path(self, temp_data_dir):
+        from jaybrain.signalforge import run_signalforge_clustering
+
+        conn = _setup_db(temp_data_dir)
+        self._setup_cluster_articles(conn, 4, similar=True)
+        conn.close()
+
+        result = run_signalforge_clustering()
+        assert result["clusters_found"] >= 1
+        assert result["articles_clustered"] >= 2
+
+    def test_skips_when_too_few(self, temp_data_dir):
+        from jaybrain.signalforge import run_signalforge_clustering
+
+        conn = _setup_db(temp_data_dir)
+        kid = "solo_kid"
+        _insert_knowledge_row(conn, kid)
+        insert_signalforge_article(conn, "sf_solo", kid)
+        update_signalforge_article(conn, "sf_solo", fetch_status="fetched")
+        conn.close()
+
+        result = run_signalforge_clustering()
+        assert result["clusters_found"] == 0
+
+    def test_no_clusters_when_distinct(self, temp_data_dir):
+        from jaybrain.signalforge import run_signalforge_clustering
+
+        conn = _setup_db(temp_data_dir)
+        self._setup_cluster_articles(conn, 4, similar=False)
+        conn.close()
+
+        result = run_signalforge_clustering()
+        assert result["clusters_found"] == 0
+
+    def test_rebuilds_on_rerun(self, temp_data_dir):
+        from jaybrain.signalforge import run_signalforge_clustering
+
+        conn = _setup_db(temp_data_dir)
+        self._setup_cluster_articles(conn, 4, similar=True)
+        conn.close()
+
+        result1 = run_signalforge_clustering()
+        result2 = run_signalforge_clustering()
+        # Should produce same clusters both times (full rebuild)
+        assert result1["clusters_found"] == result2["clusters_found"]
+
+
+# =============================================================================
+# Clustering Status + Detail (MCP Helpers)
+# =============================================================================
+
+
+class TestClusteringStatus:
+    def test_empty_state(self, temp_data_dir):
+        from jaybrain.signalforge import get_clustering_status
+
+        _setup_db(temp_data_dir)
+        status = get_clustering_status()
+        assert status["total_clusters"] == 0
+        assert status["total_articles_clustered"] == 0
+        assert status["unclustered_articles"] == 0
+
+    def test_after_clustering(self, temp_data_dir):
+        from jaybrain.signalforge import run_signalforge_clustering, get_clustering_status
+
+        conn = _setup_db(temp_data_dir)
+        vecs = _make_similar_vectors(3)
+        for i in range(3):
+            kid = f"status_kid_{i}"
+            _insert_knowledge_row(conn, kid, title=f"Similar Article {i}", embedding=vecs[i])
+            _insert_news_feed_article(conn, kid, url=f"https://ex.com/s{i}", source_id="src_s")
+            insert_signalforge_article(conn, f"sf_s_{i}", kid)
+            update_signalforge_article(conn, f"sf_s_{i}", fetch_status="fetched")
+        conn.close()
+
+        run_signalforge_clustering()
+        status = get_clustering_status()
+        assert status["total_clusters"] >= 1
+        assert status["total_articles_clustered"] >= 2
+        assert len(status["top_clusters"]) >= 1
+
+
+class TestClusterDetail:
+    def test_returns_articles(self, temp_data_dir):
+        from jaybrain.signalforge import run_signalforge_clustering, get_cluster_detail
+
+        conn = _setup_db(temp_data_dir)
+        vecs = _make_similar_vectors(3)
+        for i in range(3):
+            kid = f"detail_kid_{i}"
+            _insert_knowledge_row(conn, kid, title=f"Detail Article {i}", embedding=vecs[i])
+            _insert_news_feed_article(conn, kid, url=f"https://ex.com/d{i}", source_id="src_d")
+            insert_signalforge_article(conn, f"sf_d_{i}", kid)
+            update_signalforge_article(conn, f"sf_d_{i}", fetch_status="fetched")
+        conn.close()
+
+        run_signalforge_clustering()
+
+        # Get first cluster
+        conn = get_connection()
+        clusters = list_signalforge_clusters(conn)
+        conn.close()
+        assert len(clusters) >= 1
+
+        detail = get_cluster_detail(clusters[0]["id"])
+        assert detail is not None
+        assert len(detail["articles"]) >= 2
+        assert detail["label"] != ""
+        assert detail["significance"] > 0
+
+    def test_not_found(self, temp_data_dir):
+        from jaybrain.signalforge import get_cluster_detail
+
+        _setup_db(temp_data_dir)
+        result = get_cluster_detail("nonexistent")
+        assert result is None

@@ -106,7 +106,7 @@ class TestValidateFields:
         expected_tables = {
             "tasks", "knowledge", "forge_concepts", "job_boards",
             "applications", "graph_entities", "graph_relationships",
-            "telegram_bot_state", "cram_topics",
+            "telegram_bot_state", "cram_topics", "news_feed_sources",
         }
         assert set(_UPDATABLE_COLUMNS.keys()) == expected_tables
 

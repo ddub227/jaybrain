@@ -53,6 +53,10 @@ _UPDATABLE_COLUMNS: dict[str, frozenset[str]] = {
         "understanding", "review_count", "correct_count",
         "forge_concept_id", "last_reviewed", "updated_at",
     }),
+    "news_feed_sources": frozenset({
+        "name", "url", "source_type", "tags", "active",
+        "last_polled", "last_error", "articles_total", "updated_at",
+    }),
 }
 
 
@@ -595,6 +599,48 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 ON feedly_articles(fetched_at);
         """)
         _set_schema_version(conn, 17, "Add feedly_articles dedup tracking table")
+        conn.commit()
+
+    # --- Migration 18: News feed sources and article dedup ---
+    if current < 18:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS news_feed_sources (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'rss',
+                tags TEXT NOT NULL DEFAULT '[]',
+                active INTEGER NOT NULL DEFAULT 1,
+                last_polled TEXT,
+                last_error TEXT NOT NULL DEFAULT '',
+                articles_total INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_news_feed_sources_active
+                ON news_feed_sources(active);
+
+            CREATE TABLE IF NOT EXISTS news_feed_articles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id TEXT NOT NULL,
+                source_article_id TEXT NOT NULL,
+                knowledge_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL DEFAULT '',
+                published_at TEXT,
+                fetched_at TEXT NOT NULL,
+                FOREIGN KEY (source_id) REFERENCES news_feed_sources(id)
+                    ON DELETE CASCADE,
+                UNIQUE(source_id, source_article_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_news_feed_articles_source
+                ON news_feed_articles(source_id);
+            CREATE INDEX IF NOT EXISTS idx_news_feed_articles_url
+                ON news_feed_articles(url);
+            CREATE INDEX IF NOT EXISTS idx_news_feed_articles_fetched
+                ON news_feed_articles(fetched_at);
+        """)
+        _set_schema_version(conn, 18, "Add news_feed_sources and news_feed_articles tables")
         conn.commit()
 
 
@@ -1940,6 +1986,77 @@ def update_job_board(conn: sqlite3.Connection, board_id: str, **fields) -> bool:
     values = list(fields.values()) + [board_id]
     cursor = conn.execute(
         f"UPDATE job_boards SET {set_clause} WHERE id = ?", values  # nosec B608
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+# --- News Feed Source CRUD ---
+
+
+def insert_news_feed_source(
+    conn: sqlite3.Connection,
+    source_id: str,
+    name: str,
+    url: str,
+    source_type: str,
+    tags: list[str],
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO news_feed_sources
+        (id, name, url, source_type, tags, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (source_id, name, url, source_type, json.dumps(tags), now, now),
+    )
+    conn.commit()
+
+
+def get_news_feed_source(
+    conn: sqlite3.Connection, source_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM news_feed_sources WHERE id = ?", (source_id,)
+    ).fetchone()
+
+
+def list_news_feed_sources(
+    conn: sqlite3.Connection, active_only: bool = True
+) -> list[sqlite3.Row]:
+    if active_only:
+        return conn.execute(
+            "SELECT * FROM news_feed_sources WHERE active = 1 ORDER BY created_at"
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM news_feed_sources ORDER BY created_at"
+    ).fetchall()
+
+
+def update_news_feed_source(
+    conn: sqlite3.Connection, source_id: str, **fields
+) -> bool:
+    if not fields:
+        return False
+    _validate_fields("news_feed_sources", fields)
+    if "tags" in fields:
+        fields["tags"] = json.dumps(fields["tags"])
+    fields["updated_at"] = now_iso()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [source_id]
+    cursor = conn.execute(
+        f"UPDATE news_feed_sources SET {set_clause} WHERE id = ?",  # nosec B608
+        values,
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def delete_news_feed_source(
+    conn: sqlite3.Connection, source_id: str
+) -> bool:
+    """Delete a source and its dedup articles (CASCADE)."""
+    cursor = conn.execute(
+        "DELETE FROM news_feed_sources WHERE id = ?", (source_id,)
     )
     conn.commit()
     return cursor.rowcount > 0

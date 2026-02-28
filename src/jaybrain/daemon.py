@@ -737,6 +737,20 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register feedly_monitor module", exc_info=True)
 
+    # Phase: News Feed multi-source poll (every N minutes)
+    try:
+        from .news_feeds import run_news_feed_poll
+        from .config import NEWS_FEED_POLL_INTERVAL_MINUTES
+
+        dm.register_module(
+            "news_feed_poll",
+            run_news_feed_poll,
+            IntervalTrigger(minutes=NEWS_FEED_POLL_INTERVAL_MINUTES),
+            "Poll all news feed sources for new articles",
+        )
+    except Exception:
+        logger.error("Failed to register news_feed_poll module", exc_info=True)
+
     # Post-registration audit: log how many modules registered and warn if low
     expected_modules = {
         "conversation_archive", "daily_briefing", "life_domains_sync",
@@ -745,7 +759,7 @@ def build_daemon() -> DaemonManager:
         "goal_staleness", "time_allocation_weekly", "network_decay",
         "event_discovery", "job_board_autofetch", "vault_sync",
         "trash_auto_cleanup", "trash_sweep", "git_shadow",
-        "feedly_monitor",
+        "feedly_monitor", "news_feed_poll",
     }
     registered = set(dm.modules)
     missing = expected_modules - registered

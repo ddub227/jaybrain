@@ -3430,6 +3430,100 @@ def feedly_search(query: str, limit: int = 10) -> str:
 
 
 # =============================================================================
+# News Feed Tools (5)
+# =============================================================================
+
+@mcp.tool()
+def news_feed_add_source(
+    name: str, url: str, source_type: str = "rss", tags: list[str] | None = None
+) -> str:
+    """Register a new news feed source.
+
+    source_type: 'rss', 'atom', or 'json_api'.
+    Sources are polled automatically every 30 minutes by the daemon.
+    """
+    from .news_feeds import add_source
+
+    try:
+        result = add_source(name, url, source_type, tags or [])
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("news_feed_add_source failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def news_feed_remove_source(source_id: str) -> str:
+    """Remove a news feed source and its article dedup records.
+
+    source_id: The ID of the source to remove.
+    """
+    from .news_feeds import remove_source
+
+    try:
+        ok = remove_source(source_id)
+        if ok:
+            return json.dumps({"status": "removed", "source_id": source_id})
+        return json.dumps({"error": f"Source {source_id} not found"})
+    except Exception as e:
+        logger.error("news_feed_remove_source failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def news_feed_list_sources(active_only: bool = True) -> str:
+    """List all registered news feed sources with poll status.
+
+    active_only: If True (default), only show active sources.
+    """
+    from .news_feeds import get_sources
+
+    try:
+        sources = get_sources(active_only=active_only)
+        return json.dumps({"count": len(sources), "sources": sources})
+    except Exception as e:
+        logger.error("news_feed_list_sources failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def news_feed_poll(source_id: str = "") -> str:
+    """Manually trigger a news feed poll.
+
+    source_id: Poll a specific source. Leave empty to poll all active sources.
+    Fetches new articles, deduplicates, stores to knowledge base.
+    """
+    from .news_feeds import poll_source, run_news_feed_poll
+
+    try:
+        if source_id:
+            result = poll_source(source_id)
+        else:
+            result = run_news_feed_poll()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("news_feed_poll failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def news_feed_status() -> str:
+    """Dashboard for news feed ingestion.
+
+    Shows all sources with poll status, total article counts,
+    and the 10 most recent articles across all sources.
+    """
+    from .news_feeds import get_news_feed_status
+
+    try:
+        result = get_news_feed_status()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("news_feed_status failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Personality Tools (1)
 # =============================================================================
 

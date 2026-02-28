@@ -57,6 +57,11 @@ _UPDATABLE_COLUMNS: dict[str, frozenset[str]] = {
         "name", "url", "source_type", "tags", "active",
         "last_polled", "last_error", "articles_total", "updated_at",
     }),
+    "signalforge_articles": frozenset({
+        "resolved_url", "content_path", "word_count", "char_count",
+        "fetch_status", "fetch_error", "fetched_at", "expires_at",
+        "updated_at",
+    }),
 }
 
 
@@ -641,6 +646,34 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 ON news_feed_articles(fetched_at);
         """)
         _set_schema_version(conn, 18, "Add news_feed_sources and news_feed_articles tables")
+        conn.commit()
+
+    # --- Migration 19: SignalForge articles (full-text fetch tracking) ---
+    if current < 19:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS signalforge_articles (
+                id TEXT PRIMARY KEY,
+                knowledge_id TEXT NOT NULL,
+                resolved_url TEXT NOT NULL DEFAULT '',
+                content_path TEXT NOT NULL DEFAULT '',
+                word_count INTEGER NOT NULL DEFAULT 0,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                fetch_status TEXT NOT NULL DEFAULT 'pending',
+                fetch_error TEXT NOT NULL DEFAULT '',
+                fetched_at TEXT,
+                expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (knowledge_id) REFERENCES knowledge(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_signalforge_articles_status
+                ON signalforge_articles(fetch_status);
+            CREATE INDEX IF NOT EXISTS idx_signalforge_articles_knowledge
+                ON signalforge_articles(knowledge_id);
+            CREATE INDEX IF NOT EXISTS idx_signalforge_articles_expires
+                ON signalforge_articles(expires_at);
+        """)
+        _set_schema_version(conn, 19, "Add signalforge_articles table for full-text fetch tracking")
         conn.commit()
 
 
@@ -2060,6 +2093,88 @@ def delete_news_feed_source(
     )
     conn.commit()
     return cursor.rowcount > 0
+
+
+# --- SignalForge Article CRUD ---
+
+def insert_signalforge_article(
+    conn: sqlite3.Connection,
+    article_id: str,
+    knowledge_id: str,
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO signalforge_articles
+        (id, knowledge_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?)""",
+        (article_id, knowledge_id, now, now),
+    )
+    conn.commit()
+
+
+def get_signalforge_article(
+    conn: sqlite3.Connection, article_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM signalforge_articles WHERE id = ?", (article_id,)
+    ).fetchone()
+
+
+def get_signalforge_article_by_knowledge_id(
+    conn: sqlite3.Connection, knowledge_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM signalforge_articles WHERE knowledge_id = ?",
+        (knowledge_id,),
+    ).fetchone()
+
+
+def list_signalforge_pending(
+    conn: sqlite3.Connection, limit: int = 50
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM signalforge_articles WHERE fetch_status = 'pending' "
+        "ORDER BY created_at LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+
+def list_signalforge_expired(
+    conn: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    now = now_iso()
+    return conn.execute(
+        "SELECT * FROM signalforge_articles "
+        "WHERE fetch_status = 'fetched' AND expires_at < ?",
+        (now,),
+    ).fetchall()
+
+
+def update_signalforge_article(
+    conn: sqlite3.Connection, article_id: str, **fields
+) -> bool:
+    if not fields:
+        return False
+    _validate_fields("signalforge_articles", fields)
+    fields["updated_at"] = now_iso()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [article_id]
+    cursor = conn.execute(
+        f"UPDATE signalforge_articles SET {set_clause} WHERE id = ?",  # nosec B608
+        values,
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def count_signalforge_by_status(
+    conn: sqlite3.Connection,
+) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT fetch_status, COUNT(*) as cnt FROM signalforge_articles "
+        "GROUP BY fetch_status"
+    ).fetchall()
+    return {row["fetch_status"]: row["cnt"] for row in rows}
 
 
 # --- Job Posting CRUD ---

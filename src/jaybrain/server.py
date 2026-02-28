@@ -3524,6 +3524,73 @@ def news_feed_status() -> str:
 
 
 # =============================================================================
+# SignalForge Tools (3)
+# =============================================================================
+
+@mcp.tool()
+def signalforge_status() -> str:
+    """Get SignalForge dashboard: fetch progress, storage stats, expiring articles.
+
+    Returns counts by status (pending/fetched/failed/skipped/expired),
+    storage size, average word count, recent fetches and failures.
+    """
+    from .signalforge import get_signalforge_status
+
+    try:
+        result = get_signalforge_status()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("signalforge_status failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def signalforge_fetch(knowledge_id: str) -> str:
+    """Manually fetch full article text for a specific article.
+
+    knowledge_id: The knowledge table ID from news feed ingestion.
+    Resolves Google News URLs, extracts article text via trafilatura,
+    saves to data/articles/ with 30-day TTL.
+    """
+    from .signalforge import fetch_single
+
+    try:
+        result = fetch_single(knowledge_id)
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("signalforge_fetch failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def signalforge_read(knowledge_id: str) -> str:
+    """Read full article text from SignalForge file store.
+
+    knowledge_id: The knowledge table ID.
+    Returns the full article text if available, or an error if expired/missing.
+    """
+    from .signalforge import read_article_text
+
+    try:
+        text = read_article_text(knowledge_id)
+        if text is None:
+            return json.dumps({
+                "status": "not_found",
+                "error": "Article text not available (not fetched, expired, or missing)",
+            })
+        return json.dumps({
+            "status": "ok",
+            "knowledge_id": knowledge_id,
+            "char_count": len(text),
+            "word_count": len(text.split()),
+            "text": text,
+        })
+    except Exception as e:
+        logger.error("signalforge_read failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Personality Tools (1)
 # =============================================================================
 

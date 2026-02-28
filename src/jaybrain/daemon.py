@@ -751,6 +751,34 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register news_feed_poll module", exc_info=True)
 
+    # Phase: SignalForge article fetching (every N minutes)
+    try:
+        from .signalforge import run_signalforge_fetch
+        from .config import SIGNALFORGE_FETCH_INTERVAL_MINUTES
+
+        dm.register_module(
+            "signalforge_fetch",
+            run_signalforge_fetch,
+            IntervalTrigger(minutes=SIGNALFORGE_FETCH_INTERVAL_MINUTES),
+            "Fetch full article text for SignalForge",
+        )
+    except Exception:
+        logger.error("Failed to register signalforge_fetch module", exc_info=True)
+
+    # Phase: SignalForge cleanup (daily at configured hour)
+    try:
+        from .signalforge import run_signalforge_cleanup
+        from .config import SIGNALFORGE_CLEANUP_HOUR
+
+        dm.register_module(
+            "signalforge_cleanup",
+            run_signalforge_cleanup,
+            CronTrigger(hour=SIGNALFORGE_CLEANUP_HOUR, minute=0),
+            "Clean up expired SignalForge article files",
+        )
+    except Exception:
+        logger.error("Failed to register signalforge_cleanup module", exc_info=True)
+
     # Post-registration audit: log how many modules registered and warn if low
     expected_modules = {
         "conversation_archive", "daily_briefing", "life_domains_sync",
@@ -760,6 +788,7 @@ def build_daemon() -> DaemonManager:
         "event_discovery", "job_board_autofetch", "vault_sync",
         "trash_auto_cleanup", "trash_sweep", "git_shadow",
         "feedly_monitor", "news_feed_poll",
+        "signalforge_fetch", "signalforge_cleanup",
     }
     registered = set(dm.modules)
     missing = expected_modules - registered

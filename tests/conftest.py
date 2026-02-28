@@ -77,6 +77,15 @@ def temp_data_dir(monkeypatch, tmp_path):
     except ImportError:
         pass
 
+    # SignalForge articles dir
+    articles_dir = data_dir / "articles"
+    monkeypatch.setattr(config, "SIGNALFORGE_ARTICLES_DIR", articles_dir)
+    try:
+        import jaybrain.signalforge as sf_mod
+        monkeypatch.setattr(sf_mod, "SIGNALFORGE_ARTICLES_DIR", articles_dir)
+    except ImportError:
+        pass
+
     # Conversation archive paths
     monkeypatch.setattr(config, "CLAUDE_PROJECTS_DIR", tmp_path / "claude_projects")
 

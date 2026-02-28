@@ -19,6 +19,9 @@ dependencies = [
     "anthropic>=0.40",
     "apscheduler>=3.10,<4",
     "watchdog>=4.0",
+    "defusedxml>=0.7",
+    "trafilatura>=2.0.0",
+    "googlenewsdecoder>=0.1.7",
 ]
 
 [project.optional-dependencies]

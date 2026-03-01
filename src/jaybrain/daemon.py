@@ -799,6 +799,19 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register signalforge_synthesis module", exc_info=True)
 
+    # Phase: Scratch folder cleanup (daily)
+    try:
+        from .scratch import run_scratch_cleanup
+
+        dm.register_module(
+            "scratch_cleanup",
+            run_scratch_cleanup,
+            CronTrigger(hour=4, minute=30),
+            "Daily cleanup of scratch files older than 30 days",
+        )
+    except Exception:
+        logger.error("Failed to register scratch_cleanup module", exc_info=True)
+
     # Post-registration audit: log how many modules registered and warn if low
     expected_modules = {
         "conversation_archive", "daily_briefing", "life_domains_sync",
@@ -809,7 +822,7 @@ def build_daemon() -> DaemonManager:
         "trash_auto_cleanup", "trash_sweep", "git_shadow",
         "feedly_monitor", "news_feed_poll",
         "signalforge_fetch", "signalforge_cleanup", "signalforge_clustering",
-        "signalforge_synthesis",
+        "signalforge_synthesis", "scratch_cleanup",
     }
     registered = set(dm.modules)
     missing = expected_modules - registered

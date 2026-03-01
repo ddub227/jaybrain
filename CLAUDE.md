@@ -368,6 +368,32 @@ GramCracker is a persistent Telegram bot (`@GramCracker_bot`) that gives JJ mobi
 - JJ is a smart beginner -- he picks things up fast but don't assume jargon. If you use a technical term, explain it in the same breath with maximum energy.
 - Prefer editing existing files over creating new ones
 
+## Scratch Pad — Temporary File Storage
+
+When JJ uses the trigger `scratch[title]`, write the referenced content to a temporary file:
+
+**Path:** `~/Documents/scratch/<title_formatted>.md`
+- Replace spaces with underscores in the title
+- Lowercase the filename
+- Example: `scratch[Draft StoryAA]` → `~/Documents/scratch/draft_storyaa.md`
+
+**File format:**
+```
+<!-- scratch_created: 2026-03-01T04:15:00+00:00 -->
+# Draft StoryAA
+
+[content here]
+```
+
+**Rules:**
+- The first line MUST be the `<!-- scratch_created: ISO_TIMESTAMP -->` header (UTC). The daemon uses this to determine file age.
+- Write whatever content JJ is referring to (the last response, a code block, a summary, etc.)
+- If the title already exists, append a `_2`, `_3` suffix — never overwrite
+- Confirm with a one-liner: "Saved to scratch: draft_storyaa.md (expires DATE)"
+- Files auto-delete after 30 days (daemon runs daily at 4:30 AM)
+
+**Appending to existing files:** When JJ says `add this to scratch[title]`, find the matching file and append the new content. Do NOT update the `scratch_created` timestamp — the original creation date determines expiration.
+
 ## Security Rules
 
 - **NEVER hardcode credentials** in any file — no passwords, API keys, tokens, or secrets in source code, scripts, or config files. This is non-negotiable.

@@ -579,7 +579,6 @@ def build_daemon() -> DaemonManager:
         from .heartbeat import (
             check_forge_study_morning,
             check_forge_study_evening,
-            check_exam_countdown,
             check_stale_applications,
             check_session_crash,
             check_goal_staleness,
@@ -595,13 +594,6 @@ def build_daemon() -> DaemonManager:
             check_forge_study_morning,
             CronTrigger(hour=7, minute=0),
             "Morning forge study reminder",
-            misfire_grace_time=None,
-        )
-        dm.register_module(
-            "exam_countdown",
-            check_exam_countdown,
-            CronTrigger(hour=7, minute=15),
-            "Daily Security+ exam countdown",
             misfire_grace_time=None,
         )
         dm.register_module(
@@ -811,7 +803,7 @@ def build_daemon() -> DaemonManager:
     expected_modules = {
         "conversation_archive", "daily_briefing", "life_domains_sync",
         "life_domains_metrics", "session_crash_check", "forge_study_morning",
-        "exam_countdown", "stale_applications", "forge_study_evening",
+        "stale_applications", "forge_study_evening",
         "goal_staleness", "time_allocation_weekly", "network_decay",
         "event_discovery", "job_board_autofetch", "vault_sync",
         "trash_auto_cleanup", "trash_sweep", "git_shadow",

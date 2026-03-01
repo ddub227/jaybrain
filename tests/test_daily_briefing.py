@@ -17,10 +17,12 @@ from jaybrain.daily_briefing import (
     collect_forge_stats,
     collect_upcoming_deadlines,
     collect_time_allocation,
+    collect_signalforge_synthesis,
     format_telegram_briefing,
     build_email_html,
     _badge,
     _section_header,
+    _build_signalforge_section,
 )
 
 
@@ -379,19 +381,6 @@ class TestFormatTelegramBriefing:
         assert "Kerberoasting" in msg
         assert "Golden Ticket" in msg
 
-    def test_exam_countdown(self):
-        """Exam countdown appears when <=14 days away."""
-        forge = {"total_concepts": 10, "due_count": 5, "avg_mastery": 0.62,
-                 "mastery_distribution": {}, "current_streak": 1,
-                 "total_reviews": 50, "subjects": []}
-
-        with patch("jaybrain.config.SECURITY_PLUS_EXAM_DATE", "2026-02-28"):
-            # The function reads SECURITY_PLUS_EXAM_DATE from .config at call time
-            msg = format_telegram_briefing(EMPTY_TASKS, EMPTY_PIPELINE, forge, [])
-
-        assert "EXAM COUNTDOWN" in msg
-        assert "Security+" in msg
-
     def test_network_section(self):
         """Network section shows stale contacts."""
         network = {
@@ -494,3 +483,108 @@ class TestRunTelegramBriefing:
         # Verify the message was passed
         msg = mock_send.call_args[0][0]
         assert "JayBrain Daily Briefing" in msg
+
+
+# ---------------------------------------------------------------------------
+# SignalForge synthesis tests
+# ---------------------------------------------------------------------------
+
+
+class TestCollectSignalForgeSynthesis:
+    def test_no_synthesis_today(self, temp_data_dir):
+        _setup_db(temp_data_dir)
+        conn = _get_plain_conn(temp_data_dir)
+        result = collect_signalforge_synthesis(conn)
+        assert result["available"] is False
+        conn.close()
+
+    def test_with_synthesis(self, temp_data_dir):
+        _setup_db(temp_data_dir)
+        conn = _get_plain_conn(temp_data_dir)
+        # Insert today's synthesis
+        today = date.today().isoformat()
+        now = today + "T07:00:00"
+        conn.execute(
+            "INSERT INTO signalforge_synthesis "
+            "(id, synthesis_date, title, content, cluster_count, article_count, "
+            "word_count, gdoc_url, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("s1", today, "Cyber Threats Today", "Full article content here.",
+             3, 12, 850, "https://docs.google.com/document/d/abc123", now, now),
+        )
+        conn.commit()
+
+        result = collect_signalforge_synthesis(conn)
+        assert result["available"] is True
+        assert result["title"] == "Cyber Threats Today"
+        assert result["excerpt"] == "Full article content here."
+        assert result["cluster_count"] == 3
+        assert result["article_count"] == 12
+        assert result["word_count"] == 850
+        assert result["gdoc_url"] == "https://docs.google.com/document/d/abc123"
+        conn.close()
+
+    def test_long_content_truncated(self, temp_data_dir):
+        _setup_db(temp_data_dir)
+        conn = _get_plain_conn(temp_data_dir)
+        today = date.today().isoformat()
+        now = today + "T07:00:00"
+        long_content = "A" * 600
+        conn.execute(
+            "INSERT INTO signalforge_synthesis "
+            "(id, synthesis_date, title, content, cluster_count, article_count, "
+            "word_count, gdoc_url, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("s2", today, "Long Report", long_content, 5, 20, 2000, "", now, now),
+        )
+        conn.commit()
+
+        result = collect_signalforge_synthesis(conn)
+        assert result["available"] is True
+        assert len(result["excerpt"]) == 503  # 500 chars + "..."
+        assert result["excerpt"].endswith("...")
+        conn.close()
+
+
+class TestBuildSignalForgeSection:
+    def test_renders_html(self):
+        data = {
+            "available": True,
+            "title": "Cyber Threats Today",
+            "excerpt": "Key findings from today's analysis...",
+            "cluster_count": 3,
+            "article_count": 12,
+            "word_count": 850,
+            "gdoc_url": "https://docs.google.com/document/d/abc123",
+        }
+        html = _build_signalforge_section(data)
+        assert "Cyber Threats Today" in html
+        assert "Key findings from today" in html
+        assert "3 stories" in html
+        assert "12 articles" in html
+        assert "850 words" in html
+        assert "Read full briefing" in html
+        assert "abc123" in html
+
+    def test_not_available_empty(self):
+        html = _build_signalforge_section({"available": False})
+        assert html == ""
+
+
+class TestTelegramSignalForge:
+    def test_includes_signalforge(self):
+        sf_data = {
+            "available": True,
+            "title": "Cyber Threats Today",
+            "cluster_count": 3,
+            "article_count": 12,
+            "gdoc_url": "https://docs.google.com/document/d/abc123",
+        }
+        msg = format_telegram_briefing(
+            EMPTY_TASKS, EMPTY_PIPELINE, EMPTY_FORGE, [],
+            signalforge_data=sf_data,
+        )
+        assert "SIGNALFORGE" in msg
+        assert "Cyber Threats Today" in msg
+        assert "3 stories" in msg
+        assert "abc123" in msg

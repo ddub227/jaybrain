@@ -14,7 +14,6 @@ from typing import Optional
 from .config import (
     HEARTBEAT_APP_STALE_DAYS,
     HEARTBEAT_FORGE_DUE_THRESHOLD,
-    SECURITY_PLUS_EXAM_DATE,
     ensure_data_dirs,
 )
 from .db import get_connection, now_iso
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 RATE_LIMIT_HOURS = {
     "forge_study_morning": 20,
     "forge_study_evening": 20,
-    "exam_countdown": 22,
+
     "stale_applications": 22,
     "session_crash": 2,
     "goal_staleness": 160,  # ~weekly
@@ -134,13 +133,7 @@ def _check_forge_study(check_name: str, time_of_day: str) -> dict:
         studied_today = bool(streak_rows) and streak_rows[0]["date"] == today
         streak_length = _calculate_streak(streak_rows, today)
 
-        # Exam proximity
-        days_to_exam = _days_to_exam()
-
-        # Adaptive threshold: lower the bar as exam approaches
         threshold = HEARTBEAT_FORGE_DUE_THRESHOLD
-        if days_to_exam is not None and days_to_exam <= 7:
-            threshold = 1  # any due concept matters in the final week
 
         if due_count < threshold and studied_today:
             _log_check(check_name, False, "No action needed", False)
@@ -152,10 +145,6 @@ def _check_forge_study(check_name: str, time_of_day: str) -> dict:
         # Build notification
         parts = []
         if time_of_day == "morning":
-            # Lead with exam urgency if close
-            if days_to_exam is not None and days_to_exam <= 7:
-                parts.append(f"[{days_to_exam}d to exam]")
-
             # Queue summary
             queue_parts = []
             if due_count:
@@ -197,7 +186,7 @@ def _check_forge_study(check_name: str, time_of_day: str) -> dict:
         return {
             "triggered": True, "due_count": due_count, "new_count": new_count,
             "struggling_count": struggling_count, "studied_today": studied_today,
-            "streak": streak_length, "days_to_exam": days_to_exam, "message": message,
+            "streak": streak_length, "message": message,
         }
     except Exception as e:
         logger.error("check_forge_study failed: %s", e)
@@ -239,69 +228,6 @@ def _calculate_streak(streak_rows: list, today: str) -> int:
         else:
             break
     return streak
-
-
-def _days_to_exam() -> Optional[int]:
-    """Return days until the configured exam date, or None if not set/past."""
-    if not SECURITY_PLUS_EXAM_DATE:
-        return None
-    try:
-        exam = datetime.strptime(SECURITY_PLUS_EXAM_DATE, "%Y-%m-%d").replace(
-            tzinfo=timezone.utc
-        )
-        days = (exam - datetime.now(timezone.utc)).days
-        return days if days >= 0 else None
-    except ValueError:
-        return None
-
-
-def check_exam_countdown() -> dict:
-    """Daily Security+ exam countdown notification."""
-    check_name = "exam_countdown"
-    ensure_data_dirs()
-
-    if not SECURITY_PLUS_EXAM_DATE:
-        _log_check(check_name, False, "No exam date configured", False)
-        return {"triggered": False, "message": "No exam date configured"}
-
-    try:
-        exam_date = datetime.strptime(SECURITY_PLUS_EXAM_DATE, "%Y-%m-%d")
-        exam_date = exam_date.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return {"error": f"Invalid exam date format: {SECURITY_PLUS_EXAM_DATE}"}
-
-    now = datetime.now(timezone.utc)
-    days_left = (exam_date - now).days
-
-    if days_left < 0:
-        _log_check(check_name, False, "Exam date has passed", False)
-        return {"triggered": False, "days_left": days_left, "message": "Exam date has passed"}
-
-    if days_left > 14:
-        _log_check(check_name, False, f"{days_left} days left (>14, no alert)", False)
-        return {"triggered": False, "days_left": days_left}
-
-    # Get readiness data
-    conn = get_connection()
-    try:
-        avg_mastery = conn.execute(
-            "SELECT AVG(mastery_level) FROM forge_concepts WHERE subject_id != ''"
-        ).fetchone()[0]
-        avg_mastery = avg_mastery or 0.0
-    finally:
-        conn.close()
-
-    message = (
-        f"Security+ exam in {days_left} days! "
-        f"Current average mastery: {avg_mastery:.0%}. "
-    )
-    if days_left <= 3:
-        message += "Final stretch -- focus on weak areas."
-    elif days_left <= 7:
-        message += "One week out. Review flagged concepts."
-
-    dispatch_notification(check_name, message)
-    return {"triggered": True, "days_left": days_left, "avg_mastery": avg_mastery, "message": message}
 
 
 def check_stale_applications() -> dict:
@@ -493,7 +419,7 @@ def run_single_check(check_name: str) -> dict:
         "forge_study": check_forge_study_morning,
         "forge_study_morning": check_forge_study_morning,
         "forge_study_evening": check_forge_study_evening,
-        "exam_countdown": check_exam_countdown,
+
         "stale_applications": check_stale_applications,
         "session_crash": check_session_crash,
         "goal_staleness": check_goal_staleness,

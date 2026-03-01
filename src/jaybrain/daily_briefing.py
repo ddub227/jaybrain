@@ -569,6 +569,38 @@ def collect_news() -> dict:
         }
 
 
+def collect_signalforge_synthesis(conn: sqlite3.Connection) -> dict:
+    """Collect today's SignalForge synthesis from DB."""
+    try:
+        today = date.today().isoformat()
+        row = conn.execute(
+            "SELECT title, content, cluster_count, article_count, "
+            "word_count, gdoc_url FROM signalforge_synthesis "
+            "WHERE synthesis_date = ?",
+            (today,),
+        ).fetchone()
+
+        if not row:
+            return {"available": False}
+
+        # First 500 chars as excerpt for email
+        content = row["content"] or ""
+        excerpt = content[:500] + ("..." if len(content) > 500 else "")
+
+        return {
+            "available": True,
+            "title": row["title"],
+            "excerpt": excerpt,
+            "cluster_count": row["cluster_count"],
+            "article_count": row["article_count"],
+            "word_count": row["word_count"],
+            "gdoc_url": row["gdoc_url"] or "",
+        }
+    except Exception as e:
+        logger.error("Failed to collect SignalForge synthesis: %s", e)
+        return {"available": False, "error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # HTML Email Builder
 # ---------------------------------------------------------------------------
@@ -1217,6 +1249,44 @@ def _build_news_section(data: dict) -> str:
     </td></tr>"""
 
 
+def _build_signalforge_section(data: dict) -> str:
+    """Build the SignalForge intelligence briefing section."""
+    if not data.get("available"):
+        return ""
+
+    title = data.get("title", "Daily Briefing")
+    excerpt = data.get("excerpt", "")
+    clusters = data.get("cluster_count", 0)
+    articles = data.get("article_count", 0)
+    words = data.get("word_count", 0)
+    gdoc_url = data.get("gdoc_url", "")
+
+    meta = f"{clusters} stories | {articles} articles | {words} words"
+
+    link_html = ""
+    if gdoc_url:
+        link_html = f"""
+        <p style="margin:12px 0 0 0;">
+          <a href="{gdoc_url}" style="color:{COLORS['accent']}; text-decoration:none; font-weight:600;">
+            Read full briefing &rarr;
+          </a>
+        </p>"""
+
+    return _section_header("SignalForge Intelligence") + f"""
+    <tr><td style="padding:4px 24px 16px 24px;">
+      <p style="margin:0 0 8px 0; font-weight:600; font-size:15px; color:{COLORS['text']};">
+        {title}
+      </p>
+      <p style="margin:0 0 6px 0; font-size:11px; color:{COLORS['text_light']};">
+        {meta}
+      </p>
+      <p style="margin:0; font-size:13px; color:{COLORS['text']}; line-height:1.5;">
+        {excerpt}
+      </p>
+      {link_html}
+    </td></tr>"""
+
+
 def _build_domains_section(data: dict) -> str:
     """Build the Life Domains goals section for the daily briefing."""
     if not data or not data.get("domains"):
@@ -1279,6 +1349,7 @@ def build_email_html(
     homelab_data: Optional[dict] = None,
     news_data: Optional[dict] = None,
     domains_data: Optional[dict] = None,
+    signalforge_data: Optional[dict] = None,
 ) -> str:
     """Compose the full HTML email."""
     today = date.today()
@@ -1298,6 +1369,8 @@ def build_email_html(
     sections.append(_build_pipeline_section(pipeline_data, sheets_pipeline))
     sections.append(_build_networking_section(networking_data))
     sections.append(_build_forge_section(forge_data))
+    if signalforge_data:
+        sections.append(_build_signalforge_section(signalforge_data))
     if news_data is not None:
         sections.append(_build_news_section(news_data))
 
@@ -1445,6 +1518,9 @@ def run_briefing() -> dict:
     except Exception as e:
         logger.debug("Life domains data unavailable: %s", e)
 
+    # SignalForge synthesis (today's intelligence briefing)
+    signalforge_data = collect_signalforge_synthesis(conn) if conn else {"available": False}
+
     if conn:
         conn.close()
 
@@ -1463,6 +1539,7 @@ def run_briefing() -> dict:
         homelab_data=homelab_data,
         news_data=news_data,
         domains_data=domains_data,
+        signalforge_data=signalforge_data,
     )
 
     # --- Send via Gmail API ---
@@ -1484,6 +1561,7 @@ def run_briefing() -> dict:
                 "forge_concepts": forge_data.get("total_concepts", 0),
                 "news_general": len(news_data.get("general", [])),
                 "news_tech": len(news_data.get("tech", [])),
+                "signalforge_available": signalforge_data.get("available", False),
             },
         }
     else:
@@ -1513,6 +1591,7 @@ def format_telegram_briefing(
     domains_data: Optional[dict] = None,
     time_data: Optional[dict] = None,
     network_data: Optional[dict] = None,
+    signalforge_data: Optional[dict] = None,
 ) -> str:
     """Format collected data as a plain-text Telegram message.
 
@@ -1541,19 +1620,14 @@ def format_telegram_briefing(
                 lines.append(f"{time_str} - {e['summary']}{loc}")
         parts.append(_fmt_section(f"CALENDAR ({len(events)} event{'s' if len(events) != 1 else ''})", lines))
 
-    # Exam countdown
-    from .config import SECURITY_PLUS_EXAM_DATE
-    if SECURITY_PLUS_EXAM_DATE:
-        try:
-            exam_date = datetime.strptime(SECURITY_PLUS_EXAM_DATE, "%Y-%m-%d")
-            days_left = (exam_date.date() - today).days
-            if 0 <= days_left <= 14:
-                avg = forge_data.get("avg_mastery", 0.0)
-                parts.append(_fmt_section("EXAM COUNTDOWN", [
-                    f"Security+ in {days_left} day{'s' if days_left != 1 else ''} | Avg mastery: {int(avg * 100)}%"
-                ]))
-        except ValueError:
-            pass
+    # SignalForge intelligence
+    if signalforge_data and signalforge_data.get("available"):
+        lines = [signalforge_data["title"]]
+        meta = f"{signalforge_data['cluster_count']} stories, {signalforge_data['article_count']} articles"
+        lines.append(meta)
+        if signalforge_data.get("gdoc_url"):
+            lines.append(signalforge_data["gdoc_url"])
+        parts.append(_fmt_section("SIGNALFORGE", lines))
 
     # Deadlines
     if deadlines:
@@ -1706,6 +1780,9 @@ def run_telegram_briefing() -> dict:
     except Exception as e:
         logger.debug("Network decay data unavailable: %s", e)
 
+    # SignalForge synthesis (today's intelligence briefing)
+    signalforge_data = collect_signalforge_synthesis(conn) if conn else {"available": False}
+
     if conn:
         conn.close()
 
@@ -1719,6 +1796,7 @@ def run_telegram_briefing() -> dict:
         domains_data=domains_data,
         time_data=time_data,
         network_data=network_data,
+        signalforge_data=signalforge_data,
     )
 
     try:

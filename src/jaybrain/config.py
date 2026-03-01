@@ -332,7 +332,6 @@ NETWORK_DECAY_NUDGE_HOUR = 9
 HEARTBEAT_FORGE_DUE_THRESHOLD = 5  # notify when this many concepts are due
 HEARTBEAT_APP_STALE_DAYS = 7  # flag apps sitting in "applied" this long
 HEARTBEAT_SESSION_CRASH_ENABLED = False  # stalled session Telegram alerts
-SECURITY_PLUS_EXAM_DATE = "2026-03-01"
 
 # --- Feedly AI Feed ---
 FEEDLY_ACCESS_TOKEN = ""  # nosec B105 -- empty default, real value from env

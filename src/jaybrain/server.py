@@ -3263,7 +3263,7 @@ def heartbeat_status() -> str:
 def heartbeat_test(check_name: str) -> str:
     """Manually trigger a specific heartbeat check for testing.
 
-    check_name: One of 'forge_study', 'exam_countdown', 'stale_applications',
+    check_name: One of 'forge_study', 'stale_applications',
                 'session_crash', 'goal_staleness'.
     """
     from .heartbeat import run_single_check

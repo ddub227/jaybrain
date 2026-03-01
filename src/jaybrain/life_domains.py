@@ -17,7 +17,6 @@ from typing import Optional
 from .config import (
     LIFE_DOMAINS_AVAILABLE_HOURS_WEEK,
     LIFE_DOMAINS_DOC_ID,
-    SECURITY_PLUS_EXAM_DATE,
     ensure_data_dirs,
 )
 from .db import get_connection, now_iso

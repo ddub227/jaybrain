@@ -73,38 +73,6 @@ class TestForgeStudyCheck:
         assert result["due_count"] >= 10
 
 
-class TestExamCountdown:
-    def test_no_trigger_when_far_away(self, temp_data_dir, monkeypatch):
-        _setup_db()
-        import jaybrain.heartbeat as hb
-        far_date = (datetime.now(timezone.utc) + timedelta(days=60)).strftime("%Y-%m-%d")
-        monkeypatch.setattr(hb, "SECURITY_PLUS_EXAM_DATE", far_date)
-
-        result = hb.check_exam_countdown()
-        assert result["triggered"] is False
-
-    def test_triggers_within_14_days(self, temp_data_dir, monkeypatch):
-        _setup_db()
-        import jaybrain.heartbeat as hb
-        near_date = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d")
-        monkeypatch.setattr(hb, "SECURITY_PLUS_EXAM_DATE", near_date)
-
-        with patch("jaybrain.heartbeat.dispatch_notification", return_value=True):
-            result = hb.check_exam_countdown()
-
-        assert result["triggered"] is True
-        assert 6 <= result["days_left"] <= 7  # Allow for time-of-day rounding
-
-    def test_exam_date_passed(self, temp_data_dir, monkeypatch):
-        _setup_db()
-        import jaybrain.heartbeat as hb
-        past_date = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d")
-        monkeypatch.setattr(hb, "SECURITY_PLUS_EXAM_DATE", past_date)
-
-        result = hb.check_exam_countdown()
-        assert result["triggered"] is False
-
-
 class TestStaleApplications:
     def test_no_stale_apps(self, temp_data_dir):
         _setup_db()

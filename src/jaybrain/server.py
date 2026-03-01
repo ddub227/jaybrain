@@ -3636,6 +3636,40 @@ def signalforge_cluster_detail(cluster_id: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+@mcp.tool()
+def signalforge_synthesize(force: bool = False) -> str:
+    """Manually trigger daily SignalForge synthesis.
+
+    Synthesizes top story clusters into a daily intelligence article using Claude.
+    Publishes to Google Docs. Skips if today's synthesis already exists unless force=True.
+    force: Re-synthesize even if today's article exists.
+    """
+    from .signalforge import run_signalforge_synthesis
+
+    try:
+        result = run_signalforge_synthesis(force=force)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error("signalforge_synthesize failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def signalforge_synthesis_status() -> str:
+    """Get SignalForge synthesis dashboard.
+
+    Shows today's synthesis status, last 7 syntheses, and total token usage.
+    """
+    from .signalforge import get_synthesis_status
+
+    try:
+        result = get_synthesis_status()
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error("signalforge_synthesis_status failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
 # =============================================================================
 # Personality Tools (1)
 # =============================================================================

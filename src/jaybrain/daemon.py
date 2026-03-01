@@ -793,6 +793,20 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register signalforge_clustering module", exc_info=True)
 
+    # Phase: SignalForge synthesis (daily at configured time)
+    try:
+        from .signalforge import run_signalforge_synthesis
+        from .config import SIGNALFORGE_SYNTHESIS_HOUR, SIGNALFORGE_SYNTHESIS_MINUTE
+
+        dm.register_module(
+            "signalforge_synthesis",
+            run_signalforge_synthesis,
+            CronTrigger(hour=SIGNALFORGE_SYNTHESIS_HOUR, minute=SIGNALFORGE_SYNTHESIS_MINUTE),
+            "Synthesize top story clusters into daily SignalForge article",
+        )
+    except Exception:
+        logger.error("Failed to register signalforge_synthesis module", exc_info=True)
+
     # Post-registration audit: log how many modules registered and warn if low
     expected_modules = {
         "conversation_archive", "daily_briefing", "life_domains_sync",
@@ -803,6 +817,7 @@ def build_daemon() -> DaemonManager:
         "trash_auto_cleanup", "trash_sweep", "git_shadow",
         "feedly_monitor", "news_feed_poll",
         "signalforge_fetch", "signalforge_cleanup", "signalforge_clustering",
+        "signalforge_synthesis",
     }
     registered = set(dm.modules)
     missing = expected_modules - registered

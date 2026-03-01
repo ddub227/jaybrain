@@ -1,13 +1,14 @@
-"""SignalForge — Article intelligence engine: fetching, clustering, and lifecycle.
+"""SignalForge — Article intelligence engine: fetching, clustering, synthesis, and lifecycle.
 
 Tier 1 of the three-tier article lifecycle:
   - Tier 1 (30-day TTL): Full article text as .txt files in data/articles/
   - Tier 2 (permanent): Summary + metadata + embedding in knowledge table
-  - Tier 3 (permanent): Distilled insights from synthesis (future)
+  - Tier 3 (permanent): Distilled insights from synthesis
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import re
@@ -22,6 +23,7 @@ import numpy as np
 import requests
 
 from .config import (
+    ANTHROPIC_API_KEY,
     SCRAPE_USER_AGENT,
     SIGNALFORGE_ARTICLE_TTL_DAYS,
     SIGNALFORGE_ARTICLES_DIR,
@@ -33,6 +35,12 @@ from .config import (
     SIGNALFORGE_FETCH_DELAY_BASE,
     SIGNALFORGE_FETCH_DELAY_JITTER,
     SIGNALFORGE_MAX_ARTICLE_CHARS,
+    SIGNALFORGE_SYNTHESIS_EXCERPT_CHARS,
+    SIGNALFORGE_SYNTHESIS_MAX_CLUSTERS,
+    SIGNALFORGE_SYNTHESIS_MAX_TOKENS_COMBINE,
+    SIGNALFORGE_SYNTHESIS_MAX_TOKENS_PER_CLUSTER,
+    SIGNALFORGE_SYNTHESIS_MIN_SIGNIFICANCE,
+    SIGNALFORGE_SYNTHESIS_MODEL,
 )
 from .db import (
     _deserialize_f32,
@@ -41,15 +49,19 @@ from .db import (
     get_connection,
     get_signalforge_article_by_knowledge_id,
     get_signalforge_cluster,
+    get_signalforge_synthesis_by_date,
     init_db,
     insert_cluster_article,
     insert_signalforge_article,
     insert_signalforge_cluster,
+    insert_signalforge_synthesis,
     list_signalforge_clusters,
     list_signalforge_expired,
     list_signalforge_pending,
+    list_signalforge_syntheses,
     now_iso,
     update_signalforge_article,
+    update_signalforge_synthesis,
 )
 
 logger = logging.getLogger(__name__)
@@ -957,6 +969,386 @@ def get_clustering_status() -> dict:
             "avg_cluster_size": avg_size,
             "unclustered_articles": unclustered,
             "top_clusters": top,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Synthesis — LLM-powered daily intelligence article
+# ---------------------------------------------------------------------------
+
+
+def _get_anthropic_client():
+    """Return an Anthropic client, raising RuntimeError if no API key."""
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY not set. Cannot run SignalForge synthesis."
+        )
+    import anthropic
+
+    return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+
+def _call_claude(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int,
+    model: str = "",
+) -> dict:
+    """Call Claude API and return {text, input_tokens, output_tokens, model}."""
+    client = _get_anthropic_client()
+    used_model = model or SIGNALFORGE_SYNTHESIS_MODEL
+    response = client.messages.create(
+        model=used_model,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    return {
+        "text": response.content[0].text,
+        "input_tokens": response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
+        "model": used_model,
+    }
+
+
+CLUSTER_SYNTHESIS_SYSTEM = (
+    "You are a news analyst writing a daily cybersecurity intelligence briefing. "
+    "Synthesize multiple articles about the same story into a concise, factual summary. "
+    "Focus on: what happened, who is affected, why it matters, and what action to take. "
+    "Write in clear, professional prose. No bullet points. No hedging language."
+)
+
+CLUSTER_SYNTHESIS_USER = """Synthesize these {article_count} articles about the same story into a 150-300 word summary.
+
+Story topic: {label}
+
+Articles:
+{article_block}
+
+Write a cohesive synthesis covering the key facts, affected parties, and implications."""
+
+COMBINE_SYSTEM = (
+    "You are a news editor assembling a daily cybersecurity intelligence briefing. "
+    "Combine the individual story summaries into one cohesive article with a title. "
+    "Start with a 2-3 sentence executive summary, then cover each story under a bold heading. "
+    "Maintain a professional, authoritative tone. The audience is a security professional."
+)
+
+COMBINE_USER = """Combine these {story_count} story summaries into a daily intelligence briefing for {date}.
+
+{stories_block}
+
+Output format:
+1. A short, compelling title for the daily briefing (one line)
+2. A 2-3 sentence executive summary
+3. Each story under a **bold heading**
+
+Write the complete article."""
+
+
+def _gather_cluster_data(
+    conn, cluster_id: str, excerpt_chars: int = 0
+) -> Optional[dict]:
+    """Gather cluster metadata + article data for synthesis.
+
+    Returns {cluster_id, label, significance, articles: [{title, source, text}]}
+    or None if cluster not found.
+    """
+    cluster = get_signalforge_cluster(conn, cluster_id)
+    if not cluster:
+        return None
+
+    articles_raw = get_cluster_articles(conn, cluster_id)
+    articles = []
+    for a in articles_raw:
+        kid = a["id"]
+        text = ""
+
+        # Try Tier 1 full text first
+        if excerpt_chars > 0:
+            sf_article = get_signalforge_article_by_knowledge_id(conn, kid)
+            if sf_article and sf_article["content_path"]:
+                content_path = Path(sf_article["content_path"])
+                if content_path.exists():
+                    try:
+                        raw = content_path.read_text(encoding="utf-8")
+                        # Skip metadata header (lines before first blank line)
+                        parts = raw.split("\n\n", 1)
+                        body = parts[1] if len(parts) > 1 else raw
+                        text = body[:excerpt_chars]
+                    except Exception:
+                        pass
+
+        # Fall back to knowledge.content (RSS summary)
+        if not text:
+            k_row = conn.execute(
+                "SELECT content FROM knowledge WHERE id = ?", (kid,)
+            ).fetchone()
+            if k_row:
+                text = k_row["content"][:excerpt_chars] if excerpt_chars else k_row["content"]
+
+        articles.append({
+            "title": a["title"],
+            "source": a["source"] or "Unknown",
+            "text": text,
+        })
+
+    return {
+        "cluster_id": cluster["id"],
+        "label": cluster["label"],
+        "significance": cluster["significance"],
+        "article_count": cluster["article_count"],
+        "articles": articles,
+    }
+
+
+def _synthesize_cluster(cluster_data: dict) -> dict:
+    """Phase 1: Synthesize one cluster into a summary paragraph.
+
+    Returns {text, input_tokens, output_tokens, cluster_id, label} or {error}.
+    """
+    article_block = "\n\n".join(
+        f"### {a['title']} ({a['source']})\n{a['text']}"
+        for a in cluster_data["articles"]
+    )
+
+    user_prompt = CLUSTER_SYNTHESIS_USER.format(
+        article_count=cluster_data["article_count"],
+        label=cluster_data["label"],
+        article_block=article_block,
+    )
+
+    try:
+        result = _call_claude(
+            CLUSTER_SYNTHESIS_SYSTEM,
+            user_prompt,
+            SIGNALFORGE_SYNTHESIS_MAX_TOKENS_PER_CLUSTER,
+        )
+        return {
+            "text": result["text"],
+            "input_tokens": result["input_tokens"],
+            "output_tokens": result["output_tokens"],
+            "cluster_id": cluster_data["cluster_id"],
+            "label": cluster_data["label"],
+        }
+    except Exception as e:
+        logger.error(
+            "Synthesis failed for cluster %s: %s",
+            cluster_data["cluster_id"], e,
+        )
+        return {"error": str(e), "cluster_id": cluster_data["cluster_id"]}
+
+
+def _combine_stories(story_summaries: list[dict], synthesis_date: str) -> dict:
+    """Phase 2: Combine cluster summaries into one cohesive article.
+
+    Returns {text, title, input_tokens, output_tokens}.
+    """
+    stories_block = "\n\n---\n\n".join(
+        f"**{s['label']}**\n\n{s['text']}"
+        for s in story_summaries
+    )
+
+    user_prompt = COMBINE_USER.format(
+        story_count=len(story_summaries),
+        date=synthesis_date,
+        stories_block=stories_block,
+    )
+
+    result = _call_claude(
+        COMBINE_SYSTEM,
+        user_prompt,
+        SIGNALFORGE_SYNTHESIS_MAX_TOKENS_COMBINE,
+    )
+
+    # Extract title from first line of response
+    lines = result["text"].strip().split("\n", 1)
+    title = lines[0].strip().lstrip("#").strip()
+    content = lines[1].strip() if len(lines) > 1 else result["text"]
+
+    return {
+        "text": content,
+        "title": title,
+        "input_tokens": result["input_tokens"],
+        "output_tokens": result["output_tokens"],
+    }
+
+
+def run_signalforge_synthesis(force: bool = False) -> dict:
+    """Daemon/MCP entry point: synthesize top clusters into daily article.
+
+    1. Check if today's synthesis exists (skip unless force=True)
+    2. Get top clusters by significance
+    3. Phase 1: synthesize each cluster
+    4. Phase 2: combine into daily article
+    5. Store in DB + publish to Google Doc
+    """
+    init_db()
+    conn = get_connection()
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Idempotency check
+        existing = get_signalforge_synthesis_by_date(conn, today)
+        if existing and not force:
+            logger.info("SignalForge synthesis: already exists for %s", today)
+            return {
+                "status": "already_exists",
+                "synthesis_date": today,
+                "title": existing["title"],
+            }
+
+        # Get top clusters above minimum significance
+        clusters = list_signalforge_clusters(
+            conn,
+            limit=SIGNALFORGE_SYNTHESIS_MAX_CLUSTERS,
+            min_significance=SIGNALFORGE_SYNTHESIS_MIN_SIGNIFICANCE,
+        )
+        if not clusters:
+            logger.info("SignalForge synthesis: no clusters above significance threshold")
+            return {"status": "no_clusters", "synthesis_date": today}
+
+        # Phase 1: Synthesize each cluster
+        story_summaries = []
+        total_input = 0
+        total_output = 0
+        cluster_ids = []
+
+        for cluster in clusters:
+            data = _gather_cluster_data(
+                conn, cluster["id"],
+                excerpt_chars=SIGNALFORGE_SYNTHESIS_EXCERPT_CHARS,
+            )
+            if not data:
+                continue
+
+            result = _synthesize_cluster(data)
+            if "error" in result:
+                continue
+
+            story_summaries.append(result)
+            total_input += result["input_tokens"]
+            total_output += result["output_tokens"]
+            cluster_ids.append(cluster["id"])
+
+        if not story_summaries:
+            logger.warning("SignalForge synthesis: all cluster syntheses failed")
+            return {"status": "all_failed", "synthesis_date": today}
+
+        # Phase 2: Combine into daily article
+        combined = _combine_stories(story_summaries, today)
+        total_input += combined["input_tokens"]
+        total_output += combined["output_tokens"]
+
+        word_count = len(combined["text"].split())
+        total_articles = sum(c["article_count"] for c in clusters if c["id"] in cluster_ids)
+
+        # Store in DB
+        synthesis_id = uuid.uuid4().hex[:12]
+
+        # If force and existing, delete old one first
+        if existing and force:
+            conn.execute(
+                "DELETE FROM signalforge_synthesis WHERE id = ?",
+                (existing["id"],),
+            )
+            conn.commit()
+
+        insert_signalforge_synthesis(
+            conn,
+            synthesis_id=synthesis_id,
+            synthesis_date=today,
+            title=combined["title"],
+            content=combined["text"],
+            cluster_ids=json.dumps(cluster_ids),
+            cluster_count=len(cluster_ids),
+            article_count=total_articles,
+            word_count=word_count,
+            model_used=SIGNALFORGE_SYNTHESIS_MODEL,
+            input_tokens=total_input,
+            output_tokens=total_output,
+        )
+
+        # Publish to Google Doc
+        gdoc_id = ""
+        gdoc_url = ""
+        try:
+            from .gdocs import create_google_doc
+
+            doc_title = f"SignalForge Briefing — {today}"
+            full_content = f"# {combined['title']}\n\n{combined['text']}"
+            doc_result = create_google_doc(doc_title, full_content)
+            if doc_result.get("doc_id"):
+                gdoc_id = doc_result["doc_id"]
+                gdoc_url = doc_result.get("doc_url", "")
+                update_signalforge_synthesis(
+                    conn, synthesis_id, gdoc_id=gdoc_id, gdoc_url=gdoc_url,
+                )
+                logger.info("SignalForge synthesis published to Google Docs: %s", gdoc_url)
+        except Exception as e:
+            logger.warning("SignalForge synthesis: Google Doc publish failed: %s", e)
+
+        summary = {
+            "status": "synthesized",
+            "synthesis_date": today,
+            "synthesis_id": synthesis_id,
+            "title": combined["title"],
+            "cluster_count": len(cluster_ids),
+            "article_count": total_articles,
+            "word_count": word_count,
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "gdoc_url": gdoc_url or None,
+        }
+
+        logger.info("SignalForge synthesis complete: %s", summary)
+        return summary
+    finally:
+        conn.close()
+
+
+def get_synthesis_status() -> dict:
+    """Dashboard: today's synthesis, recent syntheses, token usage."""
+    init_db()
+    conn = get_connection()
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_synthesis = get_signalforge_synthesis_by_date(conn, today)
+
+        recent = list_signalforge_syntheses(conn, limit=7)
+        recent_list = [
+            {
+                "synthesis_date": r["synthesis_date"],
+                "title": r["title"],
+                "cluster_count": r["cluster_count"],
+                "article_count": r["article_count"],
+                "word_count": r["word_count"],
+                "gdoc_url": r["gdoc_url"] or None,
+            }
+            for r in recent
+        ]
+
+        # Total token usage across all syntheses
+        token_row = conn.execute(
+            "SELECT SUM(input_tokens) as total_in, SUM(output_tokens) as total_out, "
+            "COUNT(*) as count FROM signalforge_synthesis"
+        ).fetchone()
+
+        return {
+            "today": {
+                "synthesized": today_synthesis is not None,
+                "title": today_synthesis["title"] if today_synthesis else None,
+                "word_count": today_synthesis["word_count"] if today_synthesis else None,
+                "gdoc_url": (today_synthesis["gdoc_url"] or None) if today_synthesis else None,
+            },
+            "recent_syntheses": recent_list,
+            "token_usage": {
+                "total_syntheses": token_row["count"] or 0,
+                "total_input_tokens": token_row["total_in"] or 0,
+                "total_output_tokens": token_row["total_out"] or 0,
+            },
         }
     finally:
         conn.close()

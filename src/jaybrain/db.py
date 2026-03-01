@@ -66,6 +66,12 @@ _UPDATABLE_COLUMNS: dict[str, frozenset[str]] = {
         "label", "article_count", "source_count", "avg_similarity",
         "significance", "updated_at",
     }),
+    "signalforge_synthesis": frozenset({
+        "title", "content", "cluster_ids", "cluster_count",
+        "article_count", "word_count", "model_used",
+        "input_tokens", "output_tokens",
+        "gdoc_id", "gdoc_url", "updated_at",
+    }),
 }
 
 
@@ -710,6 +716,34 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 ON signalforge_cluster_articles(knowledge_id);
         """)
         _set_schema_version(conn, 20, "Add signalforge_clusters and cluster_articles tables")
+        conn.commit()
+
+    # --- Migration 21: SignalForge synthesis ---
+    if current < 21:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS signalforge_synthesis (
+                id TEXT PRIMARY KEY,
+                synthesis_date TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                cluster_ids TEXT NOT NULL DEFAULT '[]',
+                cluster_count INTEGER NOT NULL DEFAULT 0,
+                article_count INTEGER NOT NULL DEFAULT 0,
+                word_count INTEGER NOT NULL DEFAULT 0,
+                model_used TEXT NOT NULL DEFAULT '',
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                gdoc_id TEXT NOT NULL DEFAULT '',
+                gdoc_url TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_signalforge_synthesis_date
+                ON signalforge_synthesis(synthesis_date);
+            CREATE INDEX IF NOT EXISTS idx_signalforge_synthesis_created
+                ON signalforge_synthesis(created_at);
+        """)
+        _set_schema_version(conn, 21, "Add signalforge_synthesis table")
         conn.commit()
 
 
@@ -2296,6 +2330,83 @@ def get_cluster_articles(
            ORDER BY k.created_at""",
         (cluster_id,),
     ).fetchall()
+
+
+# --- SignalForge Synthesis CRUD ---
+
+
+def insert_signalforge_synthesis(
+    conn: sqlite3.Connection,
+    synthesis_id: str,
+    synthesis_date: str,
+    title: str,
+    content: str,
+    cluster_ids: str,
+    cluster_count: int,
+    article_count: int,
+    word_count: int,
+    model_used: str,
+    input_tokens: int,
+    output_tokens: int,
+    gdoc_id: str = "",
+    gdoc_url: str = "",
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO signalforge_synthesis
+        (id, synthesis_date, title, content, cluster_ids, cluster_count,
+         article_count, word_count, model_used, input_tokens, output_tokens,
+         gdoc_id, gdoc_url, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (synthesis_id, synthesis_date, title, content, cluster_ids,
+         cluster_count, article_count, word_count, model_used,
+         input_tokens, output_tokens, gdoc_id, gdoc_url, now, now),
+    )
+    conn.commit()
+
+
+def get_signalforge_synthesis(
+    conn: sqlite3.Connection, synthesis_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM signalforge_synthesis WHERE id = ?",
+        (synthesis_id,),
+    ).fetchone()
+
+
+def get_signalforge_synthesis_by_date(
+    conn: sqlite3.Connection, synthesis_date: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM signalforge_synthesis WHERE synthesis_date = ?",
+        (synthesis_date,),
+    ).fetchone()
+
+
+def list_signalforge_syntheses(
+    conn: sqlite3.Connection, limit: int = 10
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM signalforge_synthesis ORDER BY synthesis_date DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+
+def update_signalforge_synthesis(
+    conn: sqlite3.Connection, synthesis_id: str, **fields
+) -> bool:
+    if not fields:
+        return False
+    _validate_fields("signalforge_synthesis", fields)
+    fields["updated_at"] = now_iso()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [synthesis_id]
+    cursor = conn.execute(
+        f"UPDATE signalforge_synthesis SET {set_clause} WHERE id = ?",  # nosec B608
+        values,
+    )
+    conn.commit()
+    return cursor.rowcount > 0
 
 
 # --- Job Posting CRUD ---

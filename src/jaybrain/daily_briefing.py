@@ -47,6 +47,10 @@ def _get_google_credentials():
 
     Reuses the existing OAuth token from gdocs integration.
     Supports Sheets, Gmail, Docs, and Drive via centralized scopes.
+
+    Validates that the cached token has all required scopes (Mistake #014).
+    In daemon context we cannot trigger re-auth, so on mismatch we return
+    None with a clear warning so the error is visible in logs.
     """
     try:
         from google.auth.transport.requests import Request
@@ -61,6 +65,17 @@ def _get_google_credentials():
         creds = Credentials.from_authorized_user_file(
             str(OAUTH_TOKEN_PATH), OAUTH_SCOPES,
         )
+
+        # Validate scopes match — if config added new scopes since
+        # the token was issued, reject it (Mistake #014 prevention).
+        # In daemon context we can't run OAuth flow, so fail loudly.
+        if creds and creds.scopes and set(OAUTH_SCOPES) - set(creds.scopes):
+            missing = set(OAUTH_SCOPES) - set(creds.scopes)
+            logger.error(
+                "OAuth token missing scopes %s — delete %s and re-auth via gdocs",
+                missing, OAUTH_TOKEN_PATH,
+            )
+            return None
 
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())

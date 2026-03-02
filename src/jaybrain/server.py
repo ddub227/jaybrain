@@ -2044,11 +2044,16 @@ def graph_add_relationship(
     weight: float = 1.0,
     evidence_ids: list[str] | None = None,
     properties: dict | None = None,
+    valid_from: str | None = None,
+    valid_until: str | None = None,
 ) -> str:
     """Add or update a relationship between two entities.
 
     Entities can be referenced by ID or name. If the same triple exists, merges evidence and properties.
     Relationship types: uses, knows, related_to, part_of, depends_on, works_at, created_by, collaborates_with, learned_from.
+
+    valid_from: ISO timestamp for when this relationship became true (e.g. job start date).
+    valid_until: ISO timestamp for when this relationship ended. NULL means still active.
     """
     from .graph import add_relationship
 
@@ -2056,6 +2061,7 @@ def graph_add_relationship(
         result = add_relationship(
             source_entity, target_entity, rel_type,
             weight, evidence_ids, properties,
+            valid_from=valid_from, valid_until=valid_until,
         )
         return json.dumps(result)
     except Exception as e:
@@ -3667,6 +3673,35 @@ def signalforge_synthesis_status() -> str:
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error("signalforge_synthesis_status failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def signalforge_feed_start() -> str:
+    """Start the SignalForge HTTP feed server on localhost.
+
+    Serves a browsable news feed of clustered stories at http://localhost:8247/.
+    """
+    from .signalforge_feed import start_feed_server
+
+    try:
+        result = start_feed_server()
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error("signalforge_feed_start failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def signalforge_feed_stop() -> str:
+    """Stop the SignalForge HTTP feed server."""
+    from .signalforge_feed import stop_feed_server
+
+    try:
+        result = stop_feed_server()
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error("signalforge_feed_stop failed: %s", e, exc_info=True)
         return json.dumps({"error": str(e)})
 
 

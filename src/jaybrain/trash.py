@@ -18,6 +18,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatch
@@ -81,13 +82,21 @@ def _find_git_root(path: Path) -> Optional[Path]:
     return None
 
 
+def _git_run(args: list[str], cwd: str, timeout: int = 5) -> subprocess.CompletedProcess:
+    """Run a git command without flashing a console window on Windows."""
+    kwargs = {"capture_output": True, "cwd": cwd, "timeout": timeout}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    return subprocess.run(args, **kwargs)
+
+
 def _is_git_tracked(filepath: Path, git_root: Path) -> bool:
     """Check if a file is tracked by git."""
     try:
         rel = filepath.relative_to(git_root)
-        result = subprocess.run(
+        result = _git_run(
             ["git", "ls-files", "--error-unmatch", str(rel)],
-            capture_output=True, cwd=str(git_root), timeout=5,
+            cwd=str(git_root),
         )
         return result.returncode == 0
     except Exception:
@@ -98,9 +107,9 @@ def _is_git_ignored(filepath: Path, git_root: Path) -> bool:
     """Check if a file is in .gitignore."""
     try:
         rel = filepath.relative_to(git_root)
-        result = subprocess.run(
+        result = _git_run(
             ["git", "check-ignore", "-q", str(rel)],
-            capture_output=True, cwd=str(git_root), timeout=5,
+            cwd=str(git_root),
         )
         return result.returncode == 0
     except Exception:

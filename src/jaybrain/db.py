@@ -42,7 +42,7 @@ _UPDATABLE_COLUMNS: dict[str, frozenset[str]] = {
     }),
     "graph_relationships": frozenset({
         "source_entity_id", "target_entity_id", "rel_type", "weight",
-        "evidence_ids", "properties", "updated_at",
+        "evidence_ids", "properties", "updated_at", "valid_from", "valid_until",
     }),
     "telegram_bot_state": frozenset({
         "pid", "started_at", "last_heartbeat", "messages_in",
@@ -746,6 +746,39 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         _set_schema_version(conn, 21, "Add signalforge_synthesis table")
         conn.commit()
 
+    # --- Migration 22: Watchdog log table ---
+    if current < 22:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS watchdog_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                daemon_pid INTEGER,
+                heartbeat_age_seconds REAL,
+                action_taken TEXT NOT NULL DEFAULT '',
+                restart_pid INTEGER,
+                error_message TEXT NOT NULL DEFAULT '',
+                telegram_sent INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_watchdog_log_ts
+                ON watchdog_log(timestamp);
+        """)
+        _set_schema_version(conn, 22, "Add watchdog_log table for daemon watchdog")
+        conn.commit()
+
+    # --- Migration 23: Temporal timestamps on knowledge graph relationships ---
+    if current < 23:
+        # Check if columns already exist (fresh DBs have them in base schema)
+        existing_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(graph_relationships)").fetchall()
+        }
+        if "valid_from" not in existing_cols:
+            conn.execute("ALTER TABLE graph_relationships ADD COLUMN valid_from TEXT")
+        if "valid_until" not in existing_cols:
+            conn.execute("ALTER TABLE graph_relationships ADD COLUMN valid_until TEXT")
+        _set_schema_version(conn, 23, "Add valid_from/valid_until to graph_relationships")
+        conn.commit()
+
 
 _SCHEMA_SQL_TEMPLATE = """
 -- Memories table
@@ -1190,6 +1223,8 @@ CREATE TABLE IF NOT EXISTS graph_relationships (
     properties TEXT NOT NULL DEFAULT '{{}}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    valid_from TEXT,
+    valid_until TEXT,
     FOREIGN KEY (source_entity_id) REFERENCES graph_entities(id) ON DELETE CASCADE,
     FOREIGN KEY (target_entity_id) REFERENCES graph_entities(id) ON DELETE CASCADE
 );
@@ -2810,15 +2845,18 @@ def insert_graph_relationship(
     weight: float = 1.0,
     evidence_ids: Optional[list[str]] = None,
     properties: Optional[dict] = None,
+    valid_from: Optional[str] = None,
+    valid_until: Optional[str] = None,
 ) -> None:
     now = now_iso()
     conn.execute(
         """INSERT INTO graph_relationships
         (id, source_entity_id, target_entity_id, rel_type, weight, evidence_ids, properties,
-         created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         created_at, updated_at, valid_from, valid_until)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (rel_id, source_entity_id, target_entity_id, rel_type, weight,
-         json.dumps(evidence_ids or []), json.dumps(properties or {}), now, now),
+         json.dumps(evidence_ids or []), json.dumps(properties or {}), now, now,
+         valid_from, valid_until),
     )
     conn.commit()
 

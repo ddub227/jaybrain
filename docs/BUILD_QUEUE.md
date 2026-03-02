@@ -1,6 +1,6 @@
 # JayBrain Long-Term Build Queue
 
-Last updated: 2026-02-24
+Last updated: 2026-03-01
 
 ## Hardware Profile
 
@@ -37,12 +37,13 @@ That's comfortable on 16 GB with ~5 GB headroom.
 
 ### Codebase
 
-- **Modules:** 15+ in `src/jaybrain/`
-- **MCP Tools:** 137 registered
-- **Daemon Jobs:** 14 scheduled modules + 1 heartbeat
+- **Modules:** 49 in `src/jaybrain/`
+- **MCP Tools:** 167 registered
+- **Daemon Jobs:** 23 scheduled modules + 1 heartbeat
 - **Dependencies:** 14 required + 4 optional
-- **Tests:** 737 passing
-- **Lines of code:** ~16,500 (src/jaybrain/)
+- **Tests:** 1,014 passing
+- **Lines of code:** ~27,420 (src/jaybrain/)
+- **Schema Migrations:** 23
 
 ## Completed Features
 
@@ -72,6 +73,10 @@ That's comfortable on 16 GB with ~5 GB headroom.
 - [x] Job board auto-fetch with change detection
 - [x] Adversarial security auditor (AUDITOR_CLAUDE.md + launch script)
 - [x] SynapseForge study scheduling (enhanced heartbeat with queue depth, streak, exam proximity)
+- [x] Daemon watchdog (auto-restart dead/frozen daemon, Telegram alerts, Task Scheduler every 5 min)
+- [x] Temporal knowledge graph (valid_from/valid_until on relationships for time-aware queries)
+- [x] OAuth scope validation (both credential loaders now validate scopes, Mistake #014 prevention)
+- [x] Windowless daemon (pythonw.exe — no console window popup on start/restart)
 
 ## Build Queue
 
@@ -109,9 +114,34 @@ Enhanced `heartbeat.py` forge study checks with: queue depth (due + new + strugg
 **Why:** Blog publishing workflow exists but draft creation is manual.
 **Verdict: BUILD when homelab sessions resume regularly.**
 
+#### 8. Lightweight Screen Capture Module (replaces Screenpipe)
+**Resource cost:** Low (~50-100 MB RAM, <5% CPU)
+**What:** Custom JayBrain module for searchable screen history. Python script using `mss` for screenshots + `winocr` for Windows native OCR + SQLite storage. Runs as a daemon module on a 30-60 second timer. MCP tool exposes `search-screen-history` for querying captured text by time range, app name, or content.
+**Why not Screenpipe:** Screenpipe's OCR alone made an M3 Max hit 700% CPU. Documented memory leaks (8 GB in 30 min). Zero users have run it on N100 hardware. Even with `--disable-audio --fps 0.1`, you get ~30% of value at 10-20% CPU. Not worth the risk on N100.
+**Why build custom:** JayBrain already has SQLite, MCP tools, daemon scheduler, and embedding pipeline. Incremental work is ~2-4 hours. Fully tunable capture rate. N100-optimized from day one.
+**Verdict: BUILD when ready.** High value, low risk, fits the architecture perfectly.
+
+#### 9. A2A Protocol Support
+**Resource cost:** Low (protocol layer, no persistent processes)
+**What:** Agent-to-agent communication standard (Google + Linux Foundation). Allows JayBrain sessions to formally communicate with external agents.
+**Why:** Early movers define the standard. Complements MCP (agent-to-tool) with agent-to-agent.
+**Verdict: DESIGN FIRST.** The protocol is nascent. Monitor maturity before investing build time.
+
+#### 10. Memory Versioning (Context Repositories)
+**Resource cost:** Low-Moderate (additional DB tables + git-like diff tracking)
+**What:** Git-style branching for agent memory states. Branch, merge, and version memory snapshots. Inspired by Letta's Context Repositories concept.
+**Why:** Enables experimental memory states without contaminating the main memory. Useful for "what if" scenarios.
+**Verdict: DESIGN FIRST.** Complex feature, needs careful schema design. High value but not urgent.
+
 ### Deferred (not worth building now)
 
-#### 8. WSL Installation
+#### 11. Screenpipe Installation
+**Resource cost: HIGH-PROHIBITIVE on N100**
+**What:** Open-source 24/7 screen + audio capture with OCR and Whisper transcription.
+**Why not:** OCR made an M3 Max hit 700% CPU. Memory leaks documented (8 GB in 30 min). N100's 6W TDP means sustained turbo is impossible — would throttle to 1.8 GHz under load. Zero users have reported running on low-power x86 hardware. Even stripped down (no audio, 0.1 fps), delivers ~30% of value at 10-20% CPU and 600 MB-1.5 GB RAM.
+**Verdict: DON'T INSTALL.** Build custom screen capture module instead (#8 above).
+
+#### 12. WSL Installation
 **Resource cost: HIGH (2+ GB RAM permanently consumed)**
 **What:** Windows Subsystem for Linux for access to Linux-only tools.
 **Why considered:** Semgrep, Docker, better shell tooling.
@@ -123,13 +153,13 @@ Enhanced `heartbeat.py` forge study checks with: queue depth (due + new + strugg
 - File system cross-access (/mnt/c/) is noticeably slow
 **Verdict: DON'T INSTALL.** The resource cost isn't justified. Use GitHub Actions for Linux tooling.
 
-#### 9. Local LLM / Ollama Integration
+#### 13. Local LLM / Ollama Integration
 **Resource cost: PROHIBITIVE**
 **What:** Run local language models for offline intelligence.
 **Why not:** N100 is an efficiency chip, not a compute chip. Even small models (7B) need 4-8 GB RAM and would saturate all 4 cores. This machine can't do it.
 **Verdict: NOT FEASIBLE on current hardware.**
 
-#### 10. Docker Containers
+#### 14. Docker Containers
 **Resource cost: HIGH (requires WSL 2 on Windows)**
 **What:** Containerized services for JayBrain components.
 **Why not:** Docker Desktop on Windows requires WSL 2 (see #8). Adds 2-4 GB RAM overhead minimum. JayBrain's architecture (SQLite + Python processes) doesn't benefit from containerization at this scale.

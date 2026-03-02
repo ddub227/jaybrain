@@ -22,6 +22,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 
+def _get_pythonw() -> str:
+    """Get the path to pythonw.exe (windowless Python) if available.
+
+    Falls back to sys.executable (python.exe) if pythonw is not found.
+    Using pythonw prevents console windows from popping up when the daemon
+    runs via Task Scheduler or auto-start on logon.
+    """
+    if sys.platform != "win32":
+        return sys.executable
+    pythonw = Path(sys.executable).parent / "pythonw.exe"
+    if pythonw.exists():
+        return str(pythonw)
+    return sys.executable
+
+
 def _is_pid_alive(pid: int) -> bool:
     """Check if a process is running. Works on Windows Store Python."""
     if sys.platform == "win32":
@@ -29,6 +44,7 @@ def _is_pid_alive(pid: int) -> bool:
             result = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
                 capture_output=True, text=True, timeout=5,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
             )
             return str(pid) in result.stdout
         except Exception:
@@ -231,7 +247,8 @@ def _ensure_autostart_on_logon() -> None:
         return
     try:
         script_path = str(Path(__file__).resolve())
-        cmd = f'"{sys.executable}" "{script_path}"'
+        pythonw = _get_pythonw()
+        cmd = f'"{pythonw}" "{script_path}"'
         result = subprocess.run(
             [
                 "reg", "add",
@@ -300,12 +317,13 @@ def _run_daemon_windows(pid_file: Path, log_file: Path) -> None:
             ["schtasks", "/Delete", "/TN", task_name, "/F"],
             capture_output=True,
         )
-        # Create task to run the daemon in foreground mode (task scheduler handles backgrounding)
+        # Create task using pythonw.exe (no console window popup)
+        pythonw = _get_pythonw()
         result = subprocess.run(
             [
                 "schtasks", "/Create",
                 "/TN", task_name,
-                "/TR", f'"{sys.executable}" "{script_path}"',
+                "/TR", f'"{pythonw}" "{script_path}"',
                 "/SC", "ONCE",
                 "/ST", "00:00",
                 "/F",
@@ -366,7 +384,7 @@ def _run_daemon_popen(pid_file: Path, log_file: Path) -> None:
     else:
         popen_kwargs["start_new_session"] = True
     proc = subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve())],
+        [_get_pythonw(), str(Path(__file__).resolve())],
         **popen_kwargs,
     )
     pid_file.write_text(str(proc.pid))
@@ -417,11 +435,13 @@ def stop_daemon() -> None:
 
     try:
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+            _nw = {"creationflags": 0x08000000}  # CREATE_NO_WINDOW
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           capture_output=True, **_nw)
             # Also clean up the scheduled task if it exists
             subprocess.run(
                 ["schtasks", "/Delete", "/TN", "JayBrainDaemon", "/F"],
-                capture_output=True,
+                capture_output=True, **_nw,
             )
         else:
             os.kill(pid, signal.SIGTERM)

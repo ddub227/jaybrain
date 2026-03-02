@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,10 +36,10 @@ def _get_conn() -> sqlite3.Connection:
 def _git_cmd(args: list[str], cwd: str) -> tuple[int, str]:
     """Run a git command and return (returncode, stdout)."""
     try:
-        result = subprocess.run(
-            ["git"] + args,
-            capture_output=True, text=True, timeout=30, cwd=cwd,
-        )
+        kwargs = {"capture_output": True, "text": True, "timeout": 30, "cwd": cwd}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        result = subprocess.run(["git"] + args, **kwargs)
         return result.returncode, result.stdout.strip()
     except Exception as e:
         return -1, str(e)

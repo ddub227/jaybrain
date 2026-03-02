@@ -109,7 +109,4 @@ def temp_data_dir(monkeypatch, tmp_path):
     except ImportError:
         pass
 
-    # Vault paths (isolated to tmp_path)
-    monkeypatch.setattr(config, "VAULT_PATH", tmp_path / "vault")
-
     return data_dir

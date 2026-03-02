@@ -422,6 +422,7 @@ def _is_pid_alive(pid: int) -> bool:
             result = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
                 capture_output=True, text=True, timeout=5,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
             )
             return str(pid) in result.stdout
         except Exception:
@@ -479,7 +480,8 @@ def daemon_control(action: str) -> dict:
                 # On Windows, SIGTERM doesn't work for background processes.
                 # Use taskkill which triggers atexit/ctrl handlers.
                 import subprocess as _sp
-                _sp.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+                _sp.run(["taskkill", "/PID", str(pid), "/F"],
+                        capture_output=True, creationflags=0x08000000)
             else:
                 os.kill(pid, signal.SIGTERM)
             # Give it a moment then update DB if process didn't clean up
@@ -511,10 +513,15 @@ def daemon_control(action: str) -> dict:
         # Launch via start_daemon.py --daemon
         script = Path(__file__).parent.parent.parent / "scripts" / "start_daemon.py"
         try:
+            kwargs = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if sys.platform == "win32":
+                kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
             proc = subprocess.Popen(
                 [sys.executable, str(script), "--daemon"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                **kwargs,
             )
             return {"status": "starting", "message": f"Launcher spawned (pid={proc.pid})"}
         except Exception as e:
@@ -671,18 +678,6 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register job_board_autofetch module", exc_info=True)
 
-    # Phase 7: Obsidian vault sync (every 60 seconds)
-    try:
-        from .vault_sync import run_vault_sync
-        from .config import VAULT_SYNC_INTERVAL_SECONDS
-        dm.register_module(
-            "vault_sync",
-            run_vault_sync,
-            IntervalTrigger(seconds=VAULT_SYNC_INTERVAL_SECONDS),
-            "Sync JayBrain DB to Obsidian vault",
-        )
-    except Exception:
-        logger.error("Failed to register vault_sync module", exc_info=True)
 
     # Phase 8: GitShadow -- working tree snapshots every 10 min
     try:
@@ -812,13 +807,20 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register scratch_cleanup module", exc_info=True)
 
+    # Start SignalForge HTTP feed as a background thread (not a scheduled job)
+    try:
+        from .signalforge_feed import start_feed_server
+        start_feed_server()
+    except Exception as e:
+        logger.warning("SignalForge feed server failed to start: %s", e)
+
     # Post-registration audit: log how many modules registered and warn if low
     expected_modules = {
         "conversation_archive", "daily_briefing", "life_domains_sync",
         "life_domains_metrics", "session_crash_check", "forge_study_morning",
         "stale_applications", "forge_study_evening",
         "goal_staleness", "time_allocation_weekly", "network_decay",
-        "event_discovery", "job_board_autofetch", "vault_sync",
+        "event_discovery", "job_board_autofetch",
         "trash_auto_cleanup", "trash_sweep", "git_shadow",
         "feedly_monitor", "news_feed_poll",
         "signalforge_fetch", "signalforge_cleanup", "signalforge_clustering",

@@ -242,13 +242,12 @@ def summarize_conversation(conversation: dict) -> str:
         if not k.startswith("CLAUDECODE") and not k.startswith("CLAUDE_CODE")
     }
     try:
-        result = subprocess.run(
-            [claude_cmd, "-p", prompt],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=clean_env,
-        )
+        kwargs = {
+            "capture_output": True, "text": True, "timeout": 60, "env": clean_env,
+        }
+        if sys.platform == "win32":
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        result = subprocess.run([claude_cmd, "-p", prompt], **kwargs)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()[:1000]
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:

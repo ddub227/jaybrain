@@ -46,7 +46,7 @@ def _format_entity(row) -> dict:
 
 def _format_relationship(row) -> dict:
     """Convert a graph_relationships row to a serializable dict."""
-    return {
+    result = {
         "id": row["id"],
         "source_entity_id": row["source_entity_id"],
         "target_entity_id": row["target_entity_id"],
@@ -56,7 +56,10 @@ def _format_relationship(row) -> dict:
         "properties": json.loads(row["properties"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "valid_from": row["valid_from"] if "valid_from" in row.keys() else None,
+        "valid_until": row["valid_until"] if "valid_until" in row.keys() else None,
     }
+    return result
 
 
 def add_entity(
@@ -109,8 +112,14 @@ def add_relationship(
     weight: float = 1.0,
     evidence_ids: Optional[list[str]] = None,
     properties: Optional[dict] = None,
+    valid_from: Optional[str] = None,
+    valid_until: Optional[str] = None,
 ) -> dict:
-    """Add or update a relationship edge. Resolves entities by ID or name."""
+    """Add or update a relationship edge. Resolves entities by ID or name.
+
+    valid_from/valid_until are ISO timestamps indicating when the relationship
+    started/ended being true. NULL valid_until means still active.
+    """
     conn = get_connection()
     try:
         source_row = get_graph_entity(conn, source_entity)
@@ -135,12 +144,17 @@ def add_relationship(
             new_evidence = sorted(set(old_evidence + (evidence_ids or [])))
             new_props = {**old_props, **(properties or {})}
 
-            update_graph_relationship(
-                conn, existing["id"],
-                weight=weight,
-                evidence_ids=new_evidence,
-                properties=new_props,
-            )
+            update_fields = {
+                "weight": weight,
+                "evidence_ids": new_evidence,
+                "properties": new_props,
+            }
+            if valid_from is not None:
+                update_fields["valid_from"] = valid_from
+            if valid_until is not None:
+                update_fields["valid_until"] = valid_until
+
+            update_graph_relationship(conn, existing["id"], **update_fields)
             return {
                 "status": "updated",
                 "relationship_id": existing["id"],
@@ -148,12 +162,15 @@ def add_relationship(
                 "target": target_row["name"],
                 "rel_type": rel_type,
                 "weight": weight,
+                "valid_from": valid_from or existing["valid_from"],
+                "valid_until": valid_until or existing["valid_until"],
             }
 
         rel_id = _generate_id()
         insert_graph_relationship(
             conn, rel_id, source_id, target_id, rel_type,
             weight, evidence_ids or [], properties or {},
+            valid_from=valid_from, valid_until=valid_until,
         )
         return {
             "status": "created",
@@ -162,6 +179,8 @@ def add_relationship(
             "target": target_row["name"],
             "rel_type": rel_type,
             "weight": weight,
+            "valid_from": valid_from,
+            "valid_until": valid_until,
         }
     finally:
         conn.close()

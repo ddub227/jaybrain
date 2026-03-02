@@ -1014,10 +1014,16 @@ def _call_claude(
 
 
 CLUSTER_SYNTHESIS_SYSTEM = (
-    "You are a news analyst writing a daily cybersecurity intelligence briefing. "
-    "Synthesize multiple articles about the same story into a concise, factual summary. "
-    "Focus on: what happened, who is affected, why it matters, and what action to take. "
-    "Write in clear, professional prose. No bullet points. No hedging language."
+    "You are a brilliantly unhinged tech commentator who channels the energy of comedian "
+    "Tim Dillon — conspiratorial observations, dramatic hyperbole, grandiose declarations — "
+    "but you ALWAYS land the factual payload. You're writing a daily intelligence briefing "
+    "that people actually look forward to reading because it's sharp, funny, and ruthlessly "
+    "honest about what's really happening in tech. "
+    "Short punchy sentences. Vivid analogies. Connect dots nobody else is connecting. "
+    "Take a stance. Name names. Call out the absurdity when you see it. "
+    "Think: if Tim Dillon hosted a cybersecurity podcast and actually knew what he was "
+    "talking about. The comedy is the vehicle, the intelligence is the cargo. "
+    "No bullet points. No hedging. No corporate-speak. No 'it remains to be seen.'"
 )
 
 CLUSTER_SYNTHESIS_USER = """Synthesize these {article_count} articles about the same story into a 150-300 word summary.
@@ -1027,25 +1033,60 @@ Story topic: {label}
 Articles:
 {article_block}
 
-Write a cohesive synthesis covering the key facts, affected parties, and implications."""
+Write a tight, opinionated synthesis. Cover the key facts but make it entertaining.
+Use vivid analogies and dramatic observations. Short sentences that hit hard.
+Always land the educational payload. The reader should walk away knowing exactly
+what happened, why it matters, and what the real implications are.
+NEVER use em dashes or double dashes. Use commas, periods, or semicolons instead."""
 
 COMBINE_SYSTEM = (
-    "You are a news editor assembling a daily cybersecurity intelligence briefing. "
-    "Combine the individual story summaries into one cohesive article with a title. "
-    "Start with a 2-3 sentence executive summary, then cover each story under a bold heading. "
-    "Maintain a professional, authoritative tone. The audience is a security professional."
+    "You are a brilliantly unhinged tech intelligence editor who writes like comedian "
+    "Tim Dillon doing a morning news segment. Conspiratorial energy. Dramatic hyperbole. "
+    "Grandiose declarations that somehow circle back to a razor-sharp point. "
+    "Wild tangents that are actually the most insightful part of the whole piece. "
+    "You're assembling a daily intelligence briefing that reads like the most entertaining "
+    "newsletter in tech — people forward this to their coworkers because it's THAT good. "
+    "But underneath the comedy, you are dead serious about the facts. Every joke lands "
+    "an insight. Every dramatic declaration teaches something. Every conspiracy theory "
+    "is actually just pattern recognition that other analysts are too boring to articulate. "
+    "Short punchy sentences. Vivid analogies that make complex topics unforgettable. "
+    "No corporate-speak. No hedging. Take a stance on every story."
 )
 
 COMBINE_USER = """Combine these {story_count} story summaries into a daily intelligence briefing for {date}.
 
 {stories_block}
 
-Output format:
-1. A short, compelling title for the daily briefing (one line)
-2. A 2-3 sentence executive summary
-3. Each story under a **bold heading**
+Write the article using EXACTLY this template structure:
 
-Write the complete article."""
+<template>
+Title Goes Here On This Line
+
+Opening paragraph that sets the scene with dramatic energy. Connect the day's themes
+with a conspiratorial observation or a grandiose declaration. 2-3 sentences max.
+
+## First Story Heading
+
+First story content. Short punchy paragraphs. Vivid analogies. Land the facts
+through entertainment. End with a sharp takeaway.
+
+**Bottom line:** One devastating sentence that makes the reader go "oh damn."
+
+## Second Story Heading
+
+Second story content. Same energy. Different angle.
+
+**Bottom line:** Another killer takeaway.
+</template>
+
+Rules:
+- First line is ONLY the title text (no #, no quotes, no prefix)
+- Story headings MUST use ## (hash hash space) — never **bold** for headings
+- Each story ends with a **Bottom line:** takeaway
+- NEVER use em dashes (—) or double dashes (--). Use commas, periods, or semicolons instead.
+- Keep total under 800 words
+- The voice should feel like Tim Dillon hosting a tech intelligence podcast — unhinged
+  energy but every single fact is accurate and every joke teaches something"""
 
 
 def _gather_cluster_data(
@@ -1147,7 +1188,7 @@ def _combine_stories(story_summaries: list[dict], synthesis_date: str) -> dict:
     Returns {text, title, input_tokens, output_tokens}.
     """
     stories_block = "\n\n---\n\n".join(
-        f"**{s['label']}**\n\n{s['text']}"
+        f"STORY: {s['label']}\n\n{s['text']}"
         for s in story_summaries
     )
 
@@ -1278,7 +1319,33 @@ def run_signalforge_synthesis(force: bool = False) -> dict:
             from .gdocs import create_google_doc
 
             doc_title = f"SignalForge Briefing — {today}"
-            full_content = f"# {combined['title']}\n\n{combined['text']}"
+
+            # Post-process: convert **bold-only lines** to ## headings
+            # for proper Google Doc heading styles with spacing
+            import re
+            formatted_text = re.sub(
+                r"^\*\*(.+?)\*\*$",
+                r"## \1",
+                combined["text"],
+                flags=re.MULTILINE,
+            )
+            # Also strip "Executive Summary:" prefix if model added one
+            formatted_text = re.sub(
+                r"^\*\*Executive Summary:\*\*\s*",
+                "",
+                formatted_text,
+            )
+
+            full_content = (
+                f"# {combined['title']}\n\n"
+                f"*SignalForge Daily Intelligence — {today} · "
+                f"{len(cluster_ids)} stories · {total_articles} sources*\n\n"
+                f"---\n\n"
+                f"{formatted_text}\n\n"
+                f"---\n\n"
+                f"*Generated by SignalForge · {word_count} words · "
+                f"{total_input + total_output} tokens*"
+            )
             doc_result = create_google_doc(doc_title, full_content)
             if doc_result.get("doc_id"):
                 gdoc_id = doc_result["doc_id"]

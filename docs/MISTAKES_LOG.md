@@ -373,6 +373,12 @@ preventive measures.
     stem, not just the question presentation block
   - Session greetings must treat pinned question identity as classified
   - Memory storage of pinned questions must redact topic names
+- **REPEAT (same session):** After implementing the fix, immediately
+  repeated the mistake within the same session by saying "the SIEM
+  question" when resuming a within-session pin. Original fix was scoped
+  too narrowly (cross-session only). Contract Section 11 expanded to
+  cover ALL pin contexts universally. Pattern: fixes scoped to the
+  specific trigger instead of the general class of the bug.
 
 ### 015 -- Sleep prevention applied to wrong sleep model
 - **Date:** 2026-02-27

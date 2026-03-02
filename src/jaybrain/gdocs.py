@@ -244,6 +244,14 @@ def _markdown_to_html(md: str) -> str:
             i += 1
             continue
 
+        # --- Bold-only line as h2 (for LLM outputs that use **bold** as headings) ---
+        m = re.match(r"^\*\*(.+?)\*\*$", line.strip())
+        if m:
+            text = _inline_to_html(m.group(1).strip())
+            html.append(f"<h2>{text}</h2>")
+            i += 1
+            continue
+
         # --- Table ---
         if (
             "|" in line

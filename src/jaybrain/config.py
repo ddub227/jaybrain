@@ -270,10 +270,6 @@ HOMELAB_ATTACHMENTS_DIR = HOMELAB_JOURNAL_DIR / "attachments"
 HOMELAB_JOURNAL_FILENAME = "Learn Out Loud Lab_{date}.md"
 
 
-# --- Obsidian Vault Sync ---
-VAULT_PATH = Path(os.path.expanduser("~")) / "JayBrain-Vault"
-VAULT_SYNC_ENABLED = True
-VAULT_SYNC_INTERVAL_SECONDS = 60  # daemon checks for changes every 60s
 
 # --- File Watcher (Watchdog) ---
 FILE_WATCHER_ENABLED = True
@@ -285,14 +281,6 @@ GIT_SHADOW_ENABLED = True
 GIT_SHADOW_INTERVAL_SECONDS = 600  # 10 minutes
 GIT_SHADOW_REPO_PATHS = [str(PROJECT_ROOT)]
 
-# Category -> subfolder mapping for memories
-VAULT_MEMORY_FOLDERS = {
-    "decision": "Decisions",
-    "preference": "Preferences",
-    "procedural": "Procedures",
-    "episodic": "Experiences",
-    "semantic": "Knowledge",
-}
 
 # --- Daemon ---
 DAEMON_PID_FILE = DATA_DIR / "daemon.pid"
@@ -370,6 +358,8 @@ SIGNALFORGE_SYNTHESIS_MAX_TOKENS_PER_CLUSTER = 600
 SIGNALFORGE_SYNTHESIS_MAX_TOKENS_COMBINE = 1500
 SIGNALFORGE_SYNTHESIS_EXCERPT_CHARS = 500
 SIGNALFORGE_SYNTHESIS_MIN_SIGNIFICANCE = 2.0
+# SignalForge HTTP feed
+SIGNALFORGE_FEED_PORT = int(os.environ.get("SIGNALFORGE_FEED_PORT", "8247"))
 
 # --- Event Discovery ---
 EVENT_DISCOVERY_LOCATION = "Charlotte, NC"

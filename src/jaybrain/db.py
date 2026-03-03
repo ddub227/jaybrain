@@ -72,6 +72,16 @@ _UPDATABLE_COLUMNS: dict[str, frozenset[str]] = {
         "input_tokens", "output_tokens",
         "gdoc_id", "gdoc_url", "updated_at",
     }),
+    "incidents": frozenset({
+        "title", "date", "severity", "incident_type", "error_type",
+        "summary", "root_cause", "impact", "detection_method",
+        "time_to_detect", "time_to_resolve", "tags", "recurrence_of",
+        "status", "fix_applied", "updated_at",
+    }),
+    "incident_action_items": frozenset({
+        "description", "item_type", "status", "due_date",
+        "completed_at", "updated_at",
+    }),
 }
 
 
@@ -777,6 +787,87 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         if "valid_until" not in existing_cols:
             conn.execute("ALTER TABLE graph_relationships ADD COLUMN valid_until TEXT")
         _set_schema_version(conn, 23, "Add valid_from/valid_until to graph_relationships")
+        conn.commit()
+
+    # --- Migration 24: Incident tracking tables ---
+    if current < 24:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS incidents (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                date TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'medium',
+                incident_type TEXT NOT NULL DEFAULT 'hit',
+                error_type TEXT NOT NULL DEFAULT 'claude_mistake',
+                summary TEXT NOT NULL,
+                root_cause TEXT NOT NULL DEFAULT '',
+                impact TEXT NOT NULL DEFAULT '',
+                detection_method TEXT NOT NULL DEFAULT 'user_reported',
+                time_to_detect INTEGER,
+                time_to_resolve INTEGER,
+                tags TEXT NOT NULL DEFAULT '[]',
+                recurrence_of TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                fix_applied TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_incidents_severity ON incidents(severity);
+            CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
+            CREATE INDEX IF NOT EXISTS idx_incidents_date ON incidents(date);
+            CREATE INDEX IF NOT EXISTS idx_incidents_error_type ON incidents(error_type);
+            CREATE INDEX IF NOT EXISTS idx_incidents_incident_type ON incidents(incident_type);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS incidents_fts USING fts5(
+                title, summary, root_cause, impact, fix_applied, tags,
+                content=incidents,
+                content_rowid=rowid
+            );
+
+            CREATE TRIGGER IF NOT EXISTS incidents_ai AFTER INSERT ON incidents BEGIN
+                INSERT INTO incidents_fts(rowid, title, summary, root_cause, impact, fix_applied, tags)
+                VALUES (new.rowid, new.title, new.summary, new.root_cause, new.impact, new.fix_applied, new.tags);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS incidents_ad AFTER DELETE ON incidents BEGIN
+                INSERT INTO incidents_fts(incidents_fts, rowid, title, summary, root_cause, impact, fix_applied, tags)
+                VALUES ('delete', old.rowid, old.title, old.summary, old.root_cause, old.impact, old.fix_applied, old.tags);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS incidents_au AFTER UPDATE ON incidents BEGIN
+                INSERT INTO incidents_fts(incidents_fts, rowid, title, summary, root_cause, impact, fix_applied, tags)
+                VALUES ('delete', old.rowid, old.title, old.summary, old.root_cause, old.impact, old.fix_applied, old.tags);
+                INSERT INTO incidents_fts(rowid, title, summary, root_cause, impact, fix_applied, tags)
+                VALUES (new.rowid, new.title, new.summary, new.root_cause, new.impact, new.fix_applied, new.tags);
+            END;
+
+            CREATE TABLE IF NOT EXISTS incident_action_items (
+                id TEXT PRIMARY KEY,
+                incident_id TEXT NOT NULL REFERENCES incidents(id),
+                description TEXT NOT NULL,
+                item_type TEXT NOT NULL DEFAULT 'prevent',
+                status TEXT NOT NULL DEFAULT 'todo',
+                due_date TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_action_items_incident ON incident_action_items(incident_id);
+            CREATE INDEX IF NOT EXISTS idx_action_items_status ON incident_action_items(status);
+
+            CREATE TABLE IF NOT EXISTS incident_lessons (
+                id TEXT PRIMARY KEY,
+                incident_id TEXT NOT NULL REFERENCES incidents(id),
+                lesson_type TEXT NOT NULL DEFAULT 'went_wrong',
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_lessons_incident ON incident_lessons(incident_id);
+        """)
+        _set_schema_version(conn, 24, "Add incident tracking tables with FTS5")
         conn.commit()
 
 
@@ -1632,6 +1723,217 @@ def search_knowledge_vec(
         (_serialize_f32(embedding), limit),
     ).fetchall()
     return [(row["id"], row["distance"]) for row in rows]
+
+
+# --- Incident CRUD ---
+
+def insert_incident(
+    conn: sqlite3.Connection,
+    incident_id: str,
+    title: str,
+    date: str,
+    severity: str,
+    incident_type: str,
+    error_type: str,
+    summary: str,
+    root_cause: str = "",
+    impact: str = "",
+    detection_method: str = "user_reported",
+    time_to_detect: Optional[int] = None,
+    time_to_resolve: Optional[int] = None,
+    tags: Optional[list[str]] = None,
+    recurrence_of: Optional[str] = None,
+    fix_applied: str = "",
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO incidents
+        (id, title, date, severity, incident_type, error_type, summary,
+         root_cause, impact, detection_method, time_to_detect, time_to_resolve,
+         tags, recurrence_of, status, fix_applied, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)""",
+        (incident_id, title, date, severity, incident_type, error_type, summary,
+         root_cause, impact, detection_method, time_to_detect, time_to_resolve,
+         json.dumps(tags or []), recurrence_of, fix_applied, now, now),
+    )
+    conn.commit()
+
+
+def update_incident(conn: sqlite3.Connection, incident_id: str, **fields) -> bool:
+    if not fields:
+        return False
+    _validate_fields("incidents", fields)
+    if "tags" in fields:
+        fields["tags"] = json.dumps(fields["tags"])
+    fields["updated_at"] = now_iso()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [incident_id]
+    cursor = conn.execute(
+        f"UPDATE incidents SET {set_clause} WHERE id = ?", values  # nosec B608
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def get_incident(conn: sqlite3.Connection, incident_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM incidents WHERE id = ?", (incident_id,)
+    ).fetchone()
+
+
+def list_incidents(
+    conn: sqlite3.Connection,
+    severity: Optional[str] = None,
+    status: Optional[str] = None,
+    error_type: Optional[str] = None,
+    incident_type: Optional[str] = None,
+    tag: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    conditions: list[str] = []
+    params: list = []
+    if severity:
+        conditions.append("severity = ?")
+        params.append(severity)
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if error_type:
+        conditions.append("error_type = ?")
+        params.append(error_type)
+    if incident_type:
+        conditions.append("incident_type = ?")
+        params.append(incident_type)
+    if tag:
+        conditions.append("tags LIKE ?")
+        params.append(f"%{tag}%")
+    if date_from:
+        conditions.append("date >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("date <= ?")
+        params.append(date_to)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    params.append(limit)
+    return conn.execute(
+        f"SELECT * FROM incidents {where} ORDER BY date DESC LIMIT ?",  # nosec B608
+        params,
+    ).fetchall()
+
+
+def search_incidents_fts(
+    conn: sqlite3.Connection, query: str, limit: int = 20
+) -> list[tuple[str, float]]:
+    safe = fts5_safe_query(query)
+    if not safe:
+        return []
+    rows = conn.execute(
+        """SELECT i.id, bm25(incidents_fts) as score
+        FROM incidents_fts
+        JOIN incidents i ON i.rowid = incidents_fts.rowid
+        WHERE incidents_fts MATCH ?
+        ORDER BY score
+        LIMIT ?""",
+        (safe, limit),
+    ).fetchall()
+    return [(row["id"], row["score"]) for row in rows]
+
+
+# --- Incident Action Item CRUD ---
+
+def insert_action_item(
+    conn: sqlite3.Connection,
+    item_id: str,
+    incident_id: str,
+    description: str,
+    item_type: str = "prevent",
+    due_date: Optional[str] = None,
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO incident_action_items
+        (id, incident_id, description, item_type, status, due_date, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'todo', ?, ?, ?)""",
+        (item_id, incident_id, description, item_type, due_date, now, now),
+    )
+    conn.commit()
+
+
+def update_action_item(conn: sqlite3.Connection, item_id: str, **fields) -> bool:
+    if not fields:
+        return False
+    _validate_fields("incident_action_items", fields)
+    fields["updated_at"] = now_iso()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [item_id]
+    cursor = conn.execute(
+        f"UPDATE incident_action_items SET {set_clause} WHERE id = ?",  # nosec B608
+        values,
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def get_action_items_for_incident(
+    conn: sqlite3.Connection, incident_id: str
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM incident_action_items WHERE incident_id = ? ORDER BY created_at",
+        (incident_id,),
+    ).fetchall()
+
+
+def list_action_items(
+    conn: sqlite3.Connection,
+    status: Optional[str] = None,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    if status:
+        return conn.execute(
+            """SELECT ai.*, i.title as incident_title
+            FROM incident_action_items ai
+            JOIN incidents i ON i.id = ai.incident_id
+            WHERE ai.status = ?
+            ORDER BY ai.created_at DESC LIMIT ?""",
+            (status, limit),
+        ).fetchall()
+    return conn.execute(
+        """SELECT ai.*, i.title as incident_title
+        FROM incident_action_items ai
+        JOIN incidents i ON i.id = ai.incident_id
+        ORDER BY ai.created_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+
+# --- Incident Lesson CRUD ---
+
+def insert_lesson(
+    conn: sqlite3.Connection,
+    lesson_id: str,
+    incident_id: str,
+    lesson_type: str,
+    description: str,
+) -> None:
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO incident_lessons
+        (id, incident_id, lesson_type, description, created_at)
+        VALUES (?, ?, ?, ?, ?)""",
+        (lesson_id, incident_id, lesson_type, description, now),
+    )
+    conn.commit()
+
+
+def get_lessons_for_incident(
+    conn: sqlite3.Connection, incident_id: str
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM incident_lessons WHERE incident_id = ? ORDER BY created_at",
+        (incident_id,),
+    ).fetchall()
 
 
 # --- Stats ---

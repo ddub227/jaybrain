@@ -3970,6 +3970,146 @@ def cram_stats() -> str:
 
 
 # =============================================================================
+# Incident tracking tools
+# =============================================================================
+
+
+@mcp.tool()
+def incident_log(
+    title: str,
+    summary: str,
+    date: str | None = None,
+    severity: str = "medium",
+    incident_type: str = "hit",
+    error_type: str = "claude_mistake",
+    root_cause: str = "",
+    impact: str = "",
+    detection_method: str = "user_reported",
+    time_to_detect: int | None = None,
+    time_to_resolve: int | None = None,
+    tags: list[str] | None = None,
+    recurrence_of: str | None = None,
+    fix_applied: str = "",
+    action_items: list[dict] | None = None,
+    lessons: list[dict] | None = None,
+) -> str:
+    """Log an incident with optional action items and lessons.
+
+    Severity: low, medium, high, critical.
+    Type: hit, near_miss, observation.
+    Error type: claude_mistake, architecture_gap, code_bug, data_integrity, process_gap.
+    Detection: user_reported, automated, self_caught, routine_check.
+    action_items: [{"description": "...", "item_type": "prevent|detect|mitigate", "due_date": "YYYY-MM-DD"}]
+    lessons: [{"description": "...", "lesson_type": "went_well|went_wrong|got_lucky"}]
+    """
+    from .incidents import log_incident
+
+    try:
+        result = log_incident(
+            title=title, summary=summary, date=date, severity=severity,
+            incident_type=incident_type, error_type=error_type,
+            root_cause=root_cause, impact=impact,
+            detection_method=detection_method,
+            time_to_detect=time_to_detect, time_to_resolve=time_to_resolve,
+            tags=tags, recurrence_of=recurrence_of, fix_applied=fix_applied,
+            action_items=action_items, lessons=lessons,
+        )
+        return json.dumps({
+            "status": "logged",
+            "incident_id": result["incident"]["id"],
+            "title": result["incident"]["title"],
+            "severity": result["incident"]["severity"],
+            "action_items_created": len(result["action_item_ids"]),
+            "lessons_created": len(result["lesson_ids"]),
+        })
+    except Exception as e:
+        logger.error("incident_log failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def incident_search(
+    query: str | None = None,
+    severity: str | None = None,
+    error_type: str | None = None,
+    incident_type: str | None = None,
+    status: str | None = None,
+    tag: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 20,
+) -> str:
+    """Search incidents by keyword and/or structured filters.
+
+    query: FTS keyword search across title, summary, root_cause, impact, fix, tags.
+    Filters: severity, error_type, incident_type, status, tag, date_from, date_to.
+    """
+    from .incidents import search_incidents
+
+    try:
+        results = search_incidents(
+            query=query, severity=severity, error_type=error_type,
+            incident_type=incident_type, status=status, tag=tag,
+            date_from=date_from, date_to=date_to, limit=limit,
+        )
+        return json.dumps({"count": len(results), "incidents": results})
+    except Exception as e:
+        logger.error("incident_search failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def incident_metrics() -> str:
+    """Get incident dashboard: counts by severity/type/status, recurrence rate,
+    avg time-to-detect/resolve, action item completion rate, top tags, recent 5."""
+    from .incidents import compute_metrics
+
+    try:
+        result = compute_metrics()
+        return json.dumps(result)
+    except Exception as e:
+        logger.error("incident_metrics failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def action_item_track(
+    item_id: str | None = None,
+    status: str | None = None,
+    incident_id: str | None = None,
+    limit: int = 50,
+) -> str:
+    """Track and manage incident action items.
+
+    Modes:
+    - Update: item_id + status (todo, in_progress, done, wont_do) → updates item
+    - List by incident: incident_id → action items for that incident
+    - List open (default): → all open action items with incident titles
+    """
+    from .incidents import (
+        track_action_item,
+        get_open_action_items,
+        get_action_items_by_incident,
+    )
+
+    try:
+        if item_id and status:
+            result = track_action_item(item_id, status)
+            if result is None:
+                return json.dumps({"error": "Action item not found", "item_id": item_id})
+            return json.dumps({"status": "updated", "action_item": result})
+        elif incident_id:
+            items = get_action_items_by_incident(incident_id)
+            return json.dumps({"count": len(items), "action_items": items})
+        else:
+            items = get_open_action_items(limit=limit)
+            return json.dumps({"count": len(items), "action_items": items})
+    except Exception as e:
+        logger.error("action_item_track failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Server entry point
 # =============================================================================
 

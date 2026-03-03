@@ -554,3 +554,101 @@ class InterviewPrep(BaseModel):
     tags: list[str]
     created_at: datetime
     updated_at: datetime
+
+
+# --- Incident Tracking Enums ---
+
+class IncidentSeverity(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class IncidentType(str, Enum):
+    HIT = "hit"
+    NEAR_MISS = "near_miss"
+    OBSERVATION = "observation"
+
+
+class IncidentErrorType(str, Enum):
+    CLAUDE_MISTAKE = "claude_mistake"
+    ARCHITECTURE_GAP = "architecture_gap"
+    CODE_BUG = "code_bug"
+    DATA_INTEGRITY = "data_integrity"
+    PROCESS_GAP = "process_gap"
+
+
+class IncidentStatus(str, Enum):
+    OPEN = "open"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
+
+
+class DetectionMethod(str, Enum):
+    USER_REPORTED = "user_reported"
+    AUTOMATED = "automated"
+    SELF_CAUGHT = "self_caught"
+    ROUTINE_CHECK = "routine_check"
+
+
+class ActionItemType(str, Enum):
+    PREVENT = "prevent"
+    DETECT = "detect"
+    MITIGATE = "mitigate"
+
+
+class ActionItemStatus(str, Enum):
+    TODO = "todo"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    WONT_DO = "wont_do"
+
+
+class LessonType(str, Enum):
+    WENT_WELL = "went_well"
+    WENT_WRONG = "went_wrong"
+    GOT_LUCKY = "got_lucky"
+
+
+# --- Incident Tracking Models ---
+
+class Incident(BaseModel):
+    id: str
+    title: str
+    date: str
+    severity: IncidentSeverity
+    incident_type: IncidentType
+    error_type: IncidentErrorType
+    summary: str
+    root_cause: str = ""
+    impact: str = ""
+    detection_method: DetectionMethod = DetectionMethod.USER_REPORTED
+    time_to_detect: Optional[int] = None
+    time_to_resolve: Optional[int] = None
+    tags: list[str] = Field(default_factory=list)
+    recurrence_of: Optional[str] = None
+    status: IncidentStatus = IncidentStatus.OPEN
+    fix_applied: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class ActionItem(BaseModel):
+    id: str
+    incident_id: str
+    description: str
+    item_type: ActionItemType
+    status: ActionItemStatus = ActionItemStatus.TODO
+    due_date: Optional[str] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class Lesson(BaseModel):
+    id: str
+    incident_id: str
+    lesson_type: LessonType
+    description: str
+    created_at: datetime

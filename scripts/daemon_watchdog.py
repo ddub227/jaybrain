@@ -266,8 +266,16 @@ def check_and_restart() -> dict:
     status = row["status"]
     last_heartbeat = row["last_heartbeat"]
 
-    # Check 1: Is the process alive?
-    pid_alive = _is_pid_alive(daemon_pid) if daemon_pid else False
+    # Check 1: Is the process alive? Retry up to 3 times (1s apart) to guard
+    # against transient WMI failures on Windows that produce false negatives.
+    pid_alive = False
+    if daemon_pid:
+        for _attempt in range(3):
+            if _is_pid_alive(daemon_pid):
+                pid_alive = True
+                break
+            if _attempt < 2:
+                time.sleep(1)
 
     # Check 2: Is the heartbeat fresh?
     heartbeat_age = None

@@ -380,6 +380,70 @@ preventive measures.
   cover ALL pin contexts universally. Pattern: fixes scoped to the
   specific trigger instead of the general class of the bug.
 
+### 017 -- SignalForge synthesis fired before Tim Dillon code was finalized
+
+- **Date:** 2026-03-02
+- **Tags:** `process`, `architecture`, `verification`
+- **Error type:** Timing collision between active dev session and scheduled daemon job
+- **What happened:** JJ updated the SignalForge synthesis prompts last night to use Tim Dillon
+  voice and fixed spacing/formatting issues. A test run confirmed the new style worked (the
+  "Tim Dillon Edition" doc at 06:50 UTC exists in Drive). However, the daemon's scheduled
+  synthesis fires at 06:30 UTC. The daemon restarted at 06:48:10 UTC and immediately ran the
+  synthesis as a misfire-recovery, creating the day's canonical synthesis at 06:48:55 UTC —
+  22 minutes before the Tim Dillon changes were committed at 07:10:41 UTC. The already-exists
+  guard then blocked any subsequent synthesis from replacing it. The daily briefing linked to
+  the stale, pre-personality synthesis.
+- **Timeline:**
+  - `2026-03-01 ~21:00-22:48 EST` — Test synthesis runs during dev session (7+ Drive docs)
+  - `2026-03-02 01:48:10 EST` — Daemon restarted with code that did NOT yet have Tim Dillon changes finalized on disk
+  - `2026-03-02 01:48:55 EST` — Synthesis fires (old code). DB record locked in. Already-exists guard armed.
+  - `2026-03-02 01:50 EST` — Tim Dillon code finalized; manual test creates "Tim Dillon Edition" doc
+  - `2026-03-02 02:10:41 EST` — Tim Dillon changes committed to git
+- **Root cause (5 Whys):**
+  1. Why did the briefing lack Tim Dillon style? Synthesis used old prompt code.
+  2. Why did it use old code? Daemon restarted 22 min before commit, at a moment when changes weren't yet on disk.
+  3. Why did it matter once code was finalized? Already-exists guard blocks re-synthesis.
+  4. Why is there no re-synthesis? No mechanism to invalidate a synthesis when code changes.
+  5. Why not? No code-version tracking in synthesis records — no way to detect staleness.
+- **Systemic root cause:** Synthesis is a one-shot daily job. Once it runs, it cannot be
+  updated by normal scheduling. No link between prompt code version and synthesis validity.
+- **Impact:** JJ received a non-Tim Dillon daily briefing despite having completed the
+  personality update before morning. Test output ("Tim Dillon Edition") existed but was
+  orphaned — never linked to the briefing. JJ had to manually investigate.
+- **Fix applied:**
+  - Forced re-synthesis with `force=True` to regenerate today's briefing with Tim Dillon code
+  - Added `GDOC_FOLDER_ID` and `GDOC_SHARE_EMAIL` to `.env` for proper doc routing
+  - Switched daily briefing from Telegram to email (see Mistake #018)
+- **Prevention:**
+  - Do not restart the daemon in the 30 minutes before a scheduled synthesis (06:00-06:45 UTC)
+  - Consider adding a `code_hash` field to `signalforge_synthesis` so staleness is detectable
+  - Add a "force re-synthesize after code change" step to the development checklist
+
+### 018 -- Daily briefing routed to Telegram instead of email; no RECIPIENT_EMAIL configured
+
+- **Date:** 2026-03-02
+- **Tags:** `architecture`, `omission`, `process`
+- **Error type:** Misconfiguration (wrong output channel, missing env var)
+- **What happened:** JJ's daily briefing was being sent as a plain Telegram message via
+  `run_telegram_briefing()`. The full HTML email briefing (`run_briefing()`) was never
+  hooked up to the daemon. Additionally, `RECIPIENT_EMAIL` was not set in `.env`, meaning
+  even a manual email send would silently fail (RECIPIENT_EMAIL defaults to empty string
+  and `send_email()` would attempt to send to an empty address).
+- **Root cause:** When the daily briefing was first built, Telegram was chosen as a quick
+  delivery channel. The HTML email path (`run_briefing()`) existed in the codebase but was
+  never wired to the daemon's cron trigger. The daemon registered `run_telegram_briefing`
+  and no follow-up was done to migrate to email once the full briefing was built.
+- **Impact:** JJ never received the full HTML briefing with SignalForge section, life domains,
+  networking, and other rich sections. Telegram version is a stripped-down summary. The
+  SignalForge Google Doc link in the email version was also never tested end-to-end.
+- **Fix applied:**
+  - Changed daemon registration from `run_telegram_briefing` to `run_briefing`
+  - Added `RECIPIENT_EMAIL=joshuajbudd@gmail.com` to `.env`
+  - Daemon restart required to activate
+- **Prevention:**
+  - When a feature has multiple delivery modes, explicitly document which is active
+  - `RECIPIENT_EMAIL` should have been validated at daemon startup (warn if empty)
+
 ### 015 -- Sleep prevention applied to wrong sleep model
 - **Date:** 2026-02-27
 - **Tags:** `architecture`, `verification`, `repeat`
@@ -411,3 +475,61 @@ preventive measures.
     operation is required
   - After applying any power fix, verify with `powercfg /sleepstudy` or
     `powercfg /systempowerreport` that the fix actually prevents sleep
+
+### 019 -- Watchdog false alarm: single-shot PID check triggered by WMI transient failure
+
+- **Date:** 2026-03-02
+- **Tags:** `architecture`, `omission`
+- **Error type:** Architecture gap (no retry logic before irreversible action)
+- **What happened:** The watchdog's `_is_pid_alive()` called `tasklist` once for PID 11652.
+  Windows WMI returned an empty result transiently — caused by system load spike from a
+  Claude Code session starting at the exact same moment. The watchdog concluded the daemon
+  was dead and attempted a restart. The restart failed because the daemon's lock file
+  blocked the second instance. Telegram alert was sent to JJ. The daemon was alive and
+  healthy the entire time. Next watchdog check (4 min later): clean check_ok.
+- **Root cause:** Single data point (`tasklist` result) used to trigger an irreversible
+  action (restart attempt) with no retry or confirmation. WMI on Windows is known to have
+  transient failures under load. The watchdog had no tolerance for this.
+- **Contributing factor:** `BlockingScheduler` single-thread design caused a 4.6-minute
+  heartbeat gap (a long-running module blocked the heartbeat job), which made the system
+  look more degraded than it was at the moment of the false `tasklist` result.
+- **Impact:** One spurious Telegram alert. No downtime, no data loss. The daemon's own
+  lock file was the accidental hero — prevented a duplicate daemon from launching.
+- **Fix applied:** Added 3-attempt retry loop (1s apart) to `_is_pid_alive` in
+  `daemon_watchdog.py`. A transient WMI failure now requires 3 consecutive misses before
+  declaring the process dead. Genuine crashes still trigger within ~2 seconds.
+- **Prevention:**
+  - Any single-check that gates an irreversible action must have retry logic
+  - On Windows, never trust a single `tasklist` result — WMI is fallible under load
+  - The lock file defense worked here but should not be relied upon as the primary guard
+
+### 020 -- File watcher logging SQLite WAL internals caused 1.8 GB DB growth
+
+- **Date:** 2026-03-02
+- **Tags:** `architecture`, `omission`
+- **Error type:** Architecture gap (logger logging its own storage medium)
+- **What happened:** The file watcher (`watchdog` library) was configured to watch the
+  entire project root recursively, including `data/` where `jaybrain.db` lives. SQLite
+  WAL mode creates and destroys `.db-wal` and `.db-shm` files on every DB write as part
+  of normal checkpoint operations. The OS fires a `FILE_DELETED` event each time. The
+  file watcher caught every event and wrote a row to `file_deletion_log` — which itself
+  triggered another DB write, another WAL checkpoint, another file event. This ran
+  continuously from the moment the file watcher was deployed. Result: 6,815,030 rows in
+  `file_deletion_log`, DB grew from ~6.6 MB to 1.8 GB in a few days.
+- **Root cause:** The file watcher's default ignore list covered common noise patterns
+  (`.pyc`, `.git/`, `__pycache__/`, etc.) but not SQLite internals. Nobody considered
+  that the watcher's own log destination was inside the watched directory.
+- **Systemic root cause:** Logger logging itself — the output of the logging system was
+  inside the directory being monitored by the logging system. Classic feedback loop.
+- **Impact:** DB grew to 1.8 GB. Disk space consumed unnecessarily. Every DB operation
+  slightly slower due to larger file. No data loss or functional failure.
+- **Fix applied:**
+  - Added `*.db-wal`, `*.db-shm`, `*.db-journal` to `_DEFAULT_IGNORE_PATTERNS` in
+    `file_watcher.py`
+  - Truncated `file_deletion_log` (deleted all 6,815,030 rows)
+  - VACUUM'd DB — restored from 1.8 GB to 15 MB in 1.9 seconds
+- **Prevention:**
+  - Any file watcher must explicitly exclude the storage backend it writes to
+  - SQLite WAL files (`*.db-wal`, `*.db-shm`, `*.db-journal`) are always noise — add
+    them to ignore lists by default in any new watcher
+  - When adding a new logger/watcher, ask: "is the output inside the watched scope?"

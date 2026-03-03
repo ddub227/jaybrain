@@ -1,6 +1,6 @@
 # JayBrain Long-Term Build Queue
 
-Last updated: 2026-03-01
+Last updated: 2026-03-02
 
 ## Hardware Profile
 
@@ -30,19 +30,19 @@ That's comfortable on 16 GB with ~5 GB headroom.
 
 ### Database
 
-- **Size:** 6.6 MB (will grow slowly -- ~3.5 KB per memory, ~2 KB per forge concept)
-- **Tables:** 35 logical tables (73 including FTS/vec virtual tables)
+- **Size:** 15 MB (will grow slowly -- ~3.5 KB per memory, ~2 KB per forge concept)
+- **Tables:** 91 total (including FTS/vec virtual tables)
 - **Largest tables:** session_activity_log (1,814 rows), forge_concepts (274), forge_reviews (166)
 - **Projected size at 10K memories:** ~50-70 MB (still trivial)
 
 ### Codebase
 
-- **Modules:** 49 in `src/jaybrain/`
-- **MCP Tools:** 167 registered
+- **Modules:** 48 in `src/jaybrain/`
+- **MCP Tools:** 170 registered
 - **Daemon Jobs:** 23 scheduled modules + 1 heartbeat
 - **Dependencies:** 14 required + 4 optional
-- **Tests:** 1,014 passing
-- **Lines of code:** ~27,420 (src/jaybrain/)
+- **Tests:** 1,020 passing
+- **Lines of code:** ~27,590 (src/jaybrain/)
 - **Schema Migrations:** 23
 
 ## Completed Features
@@ -61,7 +61,7 @@ That's comfortable on 16 GB with ~5 GB headroom.
 - [x] Homelab journal system (file-based, Obsidian-compatible)
 - [x] GramCracker Telegram bot
 - [x] Pulse cross-session awareness
-- [x] Daemon with APScheduler (13 modules)
+- [x] Daemon with APScheduler (23 modules)
 - [x] Daily Telegram briefing (10 data sections)
 - [x] Time allocation tracking (activity-based from Pulse)
 - [x] Network relationship decay (contact tracking + staleness nudges)
@@ -77,6 +77,12 @@ That's comfortable on 16 GB with ~5 GB headroom.
 - [x] Temporal knowledge graph (valid_from/valid_until on relationships for time-aware queries)
 - [x] OAuth scope validation (both credential loaders now validate scopes, Mistake #014 prevention)
 - [x] Windowless daemon (pythonw.exe — no console window popup on start/restart)
+- [x] GitShadow (working tree snapshots every 10 min, searchable git_shadow_log)
+- [x] Feedly AI Feed monitor (polls Feedly every 15 min, stores articles, Telegram alerts)
+- [x] News feed multi-source polling (RSS/Atom feeds, 30-min interval, dedup by URL hash)
+- [x] SignalForge article intelligence engine (fetch full text, cluster stories, daily synthesis, Tim Dillon voice)
+- [x] SignalForge HTTP feed server (local RSS endpoint on port 8247)
+- [x] Scratch pad (30-day temp file storage at ~/Documents/scratch/, auto-cleanup daemon job)
 
 ## Build Queue
 
@@ -184,8 +190,8 @@ The items in "Deferred" are deferred specifically because they'd blow the resour
 
 ## Architecture Health Notes
 
-- **137 MCP tools** is high but not problematic -- FastMCP handles tool resolution efficiently. Consider grouping related tools under fewer entry points if latency increases.
-- **35 database tables** is reasonable. SQLite handles hundreds of tables fine. Monitor DB size when memories exceed ~1,000.
-- **13 daemon modules** are mostly cron-triggered (daily/weekly). The only interval-based jobs are heartbeat (60s) and session crash check (30m). Both are lightweight DB queries.
+- **170 MCP tools** is high but not problematic -- FastMCP handles tool resolution efficiently. Consider grouping related tools under fewer entry points if latency increases.
+- **91 database tables** (including FTS/vec virtual tables). SQLite handles this fine. Monitor DB size when memories exceed ~1,000.
+- **23 daemon modules** -- mix of cron (daily/weekly) and interval-based. Interval jobs: heartbeat (60s), session crash check (30m), git_shadow (10m), feedly (15m), news feeds (30m), signalforge fetch (60m), signalforge clustering (6h). All are lightweight except signalforge fetch which does HTTP requests.
 - **No circular dependencies** detected in the import graph.
 - **All external API calls** (Google, Telegram, NewsAPI, Anthropic) are in try/except with graceful fallbacks.

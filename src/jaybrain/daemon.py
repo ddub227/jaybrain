@@ -550,14 +550,14 @@ def build_daemon() -> DaemonManager:
     except Exception:
         logger.error("Failed to register conversation_archive module", exc_info=True)
 
-    # Phase 1b: Daily Telegram briefing
+    # Phase 1b: Daily email briefing
     try:
-        from .daily_briefing import run_telegram_briefing
+        from .daily_briefing import run_briefing
         dm.register_module(
             "daily_briefing",
-            run_telegram_briefing,
+            run_briefing,
             CronTrigger(hour=DAILY_BRIEFING_HOUR, minute=DAILY_BRIEFING_MINUTE),
-            "Morning Telegram briefing digest",
+            "Morning email briefing digest",
             misfire_grace_time=None,
         )
     except Exception:

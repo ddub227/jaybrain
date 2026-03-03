@@ -47,6 +47,12 @@ _DEFAULT_IGNORE_PATTERNS = [
     "*~",
     "*/Thumbs.db",
     "*/.DS_Store",
+    # SQLite WAL/journal internals -- these are created and destroyed on every
+    # DB write (checkpoint). Logging them causes a feedback loop that fills the
+    # file_deletion_log with millions of noise rows.
+    "*.db-wal",
+    "*.db-shm",
+    "*.db-journal",
 ]
 
 

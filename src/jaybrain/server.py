@@ -2124,6 +2124,103 @@ def graph_list(
 
 
 # =============================================================================
+# Fact History (2)
+# =============================================================================
+
+
+@mcp.tool()
+def fact_track(
+    entity_name: str,
+    attribute: str,
+    new_value: str,
+    old_value: str = "",
+    event_time: str | None = None,
+    source: str = "session",
+) -> str:
+    """Record a fact change for a knowledge graph entity.
+
+    Tracks how facts evolve over time — job changes, skill levels, relationship shifts.
+    The entity must exist in the knowledge graph.
+    Source: 'session', 'profile_update', 'inference', 'user_correction'.
+    """
+    from .db import get_connection, insert_fact_history, now_iso
+
+    try:
+        conn = get_connection()
+        # Resolve entity by name
+        entity = conn.execute(
+            "SELECT id, name FROM graph_entities WHERE LOWER(name) = LOWER(?)",
+            (entity_name,),
+        ).fetchone()
+        if not entity:
+            conn.close()
+            return json.dumps({"error": f"Entity '{entity_name}' not found in knowledge graph"})
+
+        import uuid
+        fact_id = uuid.uuid4().hex[:12]
+        insert_fact_history(
+            conn, fact_id, entity["id"], attribute,
+            old_value or None, new_value,
+            event_time=event_time, source=source,
+        )
+        conn.close()
+        return json.dumps({
+            "status": "tracked",
+            "fact_id": fact_id,
+            "entity": entity["name"],
+            "attribute": attribute,
+            "change": f"{old_value or '(none)'} -> {new_value}",
+        })
+    except Exception as e:
+        logger.error("fact_track failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def fact_history(
+    entity_name: str | None = None,
+    attribute: str | None = None,
+    limit: int = 30,
+) -> str:
+    """Query the fact change history for entities.
+
+    Shows how facts have evolved over time. Filter by entity name and/or attribute.
+    Returns chronological changes with old -> new values.
+    """
+    from .db import get_connection, list_fact_history
+
+    try:
+        conn = get_connection()
+        entity_id = None
+        if entity_name:
+            entity = conn.execute(
+                "SELECT id FROM graph_entities WHERE LOWER(name) = LOWER(?)",
+                (entity_name,),
+            ).fetchone()
+            if not entity:
+                conn.close()
+                return json.dumps({"error": f"Entity '{entity_name}' not found"})
+            entity_id = entity["id"]
+
+        rows = list_fact_history(conn, entity_id, attribute, limit)
+        conn.close()
+        changes = []
+        for row in rows:
+            changes.append({
+                "entity": row["entity_name"] or row["entity_id"],
+                "attribute": row["attribute"],
+                "old_value": row["old_value"],
+                "new_value": row["new_value"],
+                "event_time": row["event_time"],
+                "source": row["source"],
+            })
+        return json.dumps({"count": len(changes), "changes": changes})
+    except Exception as e:
+        logger.error("fact_history failed: %s", e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# =============================================================================
 # Network Decay (4)
 # =============================================================================
 

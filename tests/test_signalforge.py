@@ -1215,7 +1215,7 @@ class TestCallClaude:
     def test_missing_api_key_raises(self, temp_data_dir):
         from jaybrain.signalforge import _get_anthropic_client
 
-        with patch("jaybrain.signalforge.ANTHROPIC_API_KEY", ""):
+        with patch("jaybrain.config.ANTHROPIC_API_KEY", ""):
             with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY not set"):
                 _get_anthropic_client()
 

@@ -23,7 +23,6 @@ import numpy as np
 import requests
 
 from .config import (
-    ANTHROPIC_API_KEY,
     SCRAPE_USER_AGENT,
     SIGNALFORGE_ARTICLE_TTL_DAYS,
     SIGNALFORGE_ARTICLES_DIR,
@@ -981,13 +980,15 @@ def get_clustering_status() -> dict:
 
 def _get_anthropic_client():
     """Return an Anthropic client, raising RuntimeError if no API key."""
-    if not ANTHROPIC_API_KEY:
+    from . import config as _cfg  # live reference, not frozen import-time copy
+
+    if not _cfg.ANTHROPIC_API_KEY:
         raise RuntimeError(
             "ANTHROPIC_API_KEY not set. Cannot run SignalForge synthesis."
         )
     import anthropic
 
-    return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return anthropic.Anthropic(api_key=_cfg.ANTHROPIC_API_KEY)
 
 
 def _call_claude(

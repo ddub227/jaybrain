@@ -19,7 +19,6 @@ from typing import Optional
 import requests
 
 from .config import (
-    ANTHROPIC_API_KEY,
     GRAMCRACKER_CLAUDE_MODEL,
     TELEGRAM_API_BASE,
     TELEGRAM_AUTHORIZED_USER,
@@ -347,7 +346,9 @@ class GramCracker:
     def __init__(self) -> None:
         if not TELEGRAM_BOT_TOKEN:
             raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
-        if not ANTHROPIC_API_KEY:
+        from . import config as _cfg  # live reference, not frozen import-time copy
+
+        if not _cfg.ANTHROPIC_API_KEY:
             raise RuntimeError("ANTHROPIC_API_KEY not set")
 
         self.api = TelegramAPI(TELEGRAM_BOT_TOKEN)
@@ -357,7 +358,7 @@ class GramCracker:
 
         # Load Anthropic client
         import anthropic
-        self.claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        self.claude = anthropic.Anthropic(api_key=_cfg.ANTHROPIC_API_KEY)
 
         # Load poll offset from DB
         conn = get_connection()

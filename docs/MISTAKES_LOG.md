@@ -503,6 +503,62 @@ preventive measures.
   - On Windows, never trust a single `tasklist` result — WMI is fallible under load
   - The lock file defense worked here but should not be relied upon as the primary guard
 
+### 022 -- Bash output revealed next question's topic name
+
+- **Date:** 2026-03-03
+- **Tags:** `communication`, `omission`, `repeat`
+- **Error type:** Claude mistake (quiz answer leaked through tool output)
+- **What happened:** After recording Q#167's review, the bash script also fetched the next
+  topic and printed both the topic name and ID in the output: "NEXT: e9f3e1e6e524 | Transit
+  gateway". This was visible to JJ before Q#168 was asked, burning the topic entirely.
+  Additionally, DB writes were running as blocking (visible) bash calls rather than background.
+- **Root cause:** Combined next-topic lookup with DB write in one visible bash script.
+  The script printed the topic name as debug output, which appeared in Claude Code's tool
+  output panel visible to the user. Contract says "DB code MUST be invisible" but had no
+  explicit rule about echoing topic names in output.
+- **Pattern:** Same class as Mistake #016 (topic leaked before question) — different channel,
+  same effect. Hints ruin the question regardless of whether they come from a greeting, a
+  pin reference, or a bash output panel.
+- **Impact:** Transit gateway topic burned (e9f3e1e6e524) — queued for unannounced re-test.
+  JJ had to stop the quiz to flag it.
+- **Fix applied:**
+  - MEMORY.md and contract updated: NEVER echo topic name/ID in any bash output
+  - DB writes must use run_in_background=true
+  - Next-topic fetch must output description ONLY, never topic name or ID
+- **Prevention:**
+  - All quiz-related bash scripts must be reviewed: does the output contain ANY hint?
+  - Topic name and ID are classified during quiz — treat them like credentials
+
+### 021 -- Quiz question quality degraded when source_question is absent
+
+- **Date:** 2026-03-02
+- **Tags:** `omission`, `communication`, `process`
+- **Error type:** Claude mistake (missing quality gate for improvised questions)
+- **What happened:** Q#163 (SAN) was voided — ambiguous correct answer (wildcard also valid
+  for same-domain scenario). Q#164 (S/MIME) was presented without a question stem. Q#165
+  (RPO) tested arithmetic instead of the Security+ concept with no mention of "RPO" anywhere
+  in the question. JJ caught all three in sequence and called for an RCA.
+- **Root cause:** Only 36/130 cram topics have a `source_question` — actual exam-style
+  questions from study material. For the other 94 (no source_question), questions are
+  improvised from a 1-2 sentence description alone. The quiz ran fine for ~150 questions
+  largely cycling through topics that had source questions. Once the reinforcement phase
+  hit zero-tier topics (most without source questions), improvised question quality degraded.
+  No quality gate existed to catch ambiguous or off-concept questions before presentation.
+- **Contributing factor:** No step in the question construction process to verify that
+  exactly ONE answer is clearly most correct, or that the question is anchored to
+  Security+ SY0-701 exam standards.
+- **Impact:** One question voided, two questions called out as low quality. JJ's session
+  interrupted for RCA. Trust in question quality temporarily damaged.
+- **Fix applied:**
+  - Added "No source_question protocol" to Contract Section 2: when source_question is
+    absent, search online for CompTIA Security+ SY0-701 practice questions on the topic
+    before writing. Use Professor Messer, Jason Dion, ExamTopics, Darril Gibson as sources.
+  - Verify ONE clearly most-correct answer with a strong reason before presenting.
+  - Include concept name or Security+ framing so the question is clearly concept-driven.
+- **Prevention:**
+  - CompTIA Security+ SY0-701 is the primary reference. When DB source material is absent,
+    go online before writing — never improvise from description alone.
+
 ### 020 -- File watcher logging SQLite WAL internals caused 1.8 GB DB growth
 
 - **Date:** 2026-03-02
@@ -533,3 +589,130 @@ preventive measures.
   - SQLite WAL files (`*.db-wal`, `*.db-shm`, `*.db-journal`) are always noise — add
     them to ignore lists by default in any new watcher
   - When adding a new logger/watcher, ask: "is the output inside the watched scope?"
+
+### 023 -- Import-time frozen API key caused all SignalForge syntheses to silently fail
+
+- **Date:** 2026-03-03
+- **Tags:** `architecture`, `verification`
+- **Error type:** Code bug (Python import semantics)
+- **What happened:** `signalforge.py` line 26 imported `ANTHROPIC_API_KEY` via
+  `from .config import ANTHROPIC_API_KEY`. Python's `from X import Y` creates a
+  value copy at import time, NOT a live reference. The daemon imports all modules
+  before `config.init()` runs, so the copy is permanently an empty string. Every
+  synthesis attempt called `_get_anthropic_client()`, checked the frozen empty
+  copy, raised `RuntimeError`, and `_synthesize_cluster()` caught the exception
+  and returned an error dict. All clusters failed silently. Same latent bug
+  existed in `telegram.py` line 22.
+- **Root cause:** Python import semantics: `from module import X` copies the
+  value at import time. `from . import module` creates a live module reference.
+  `config.init()` sets values AFTER all module-level imports have already frozen
+  their copies. Any module importing a config value at the top level gets the
+  pre-init empty string permanently.
+- **Systemic root cause:** The daemon's execution log recorded `all_failed`
+  under `status: success` -- a misleading status label that masked total failure
+  as normal operation. Silent failure + misleading status = invisible breakage.
+- **Impact:** Zero SignalForge syntheses succeeding for unknown duration (since
+  last daemon restart). JJ not receiving daily stories.
+- **Fix applied:**
+  - `signalforge.py`: Removed `ANTHROPIC_API_KEY` from top-level imports.
+    `_get_anthropic_client()` now uses `from . import config as _cfg` for live
+    reference to `_cfg.ANTHROPIC_API_KEY`
+  - `telegram.py`: Same fix applied proactively (identical latent bug)
+  - `test_signalforge.py`: Updated patch target from
+    `jaybrain.signalforge.ANTHROPIC_API_KEY` to `jaybrain.config.ANTHROPIC_API_KEY`
+  - Daemon restarted. Manual synthesis verified working (5 clusters, 86 articles).
+- **Prevention:**
+  - Never import config VALUES at module level — import the config MODULE and
+    access attributes at call time
+  - Pattern: `from . import config as _cfg` then `_cfg.SOME_VALUE` in functions
+  - Add a daemon startup check: after `config.init()`, verify critical API keys
+    are non-empty
+  - `status: success` in daemon logs should mean "task completed successfully,"
+    not "task ran without crashing." `all_failed` is not success.
+
+### 024 -- RCA misdirected to email system instead of SignalForge synthesis
+
+- **Date:** 2026-03-03
+- **Tags:** `communication`, `omission`, `repeat`
+- **Error type:** Claude mistake (investigated wrong system)
+- **What happened:** JJ reported not receiving his SignalForge synthesized
+  story. I investigated the daily briefing EMAIL system — checking email
+  delivery, HTML formatting, the SignalForge section in the email template.
+  JJ had to explicitly correct me: "I DID receive my daily briefing via
+  email correctly... The problem is only that I am not receiving the
+  SignalForge synthesized story." The synthesis pipeline (clustering -> LLM
+  synthesis -> Google Doc) was the actual failure, not email delivery.
+- **Root cause:** Conflated "SignalForge story" with "daily briefing email
+  that contains a SignalForge section." These are two different things:
+  (1) synthesis produces a story and stores it in a Google Doc, (2) the
+  briefing email links to that doc. Jumped to the email pipeline without
+  parsing JJ's report carefully.
+- **Pattern:** Same as #002 (investigated symptom not cause), #011 (wrong
+  hypothesis from insufficient listening), #013 (didn't ask before
+  concluding). Recurring anti-pattern: hearing the report, forming an
+  immediate hypothesis, and investigating that hypothesis instead of the
+  user's actual words.
+- **Impact:** Wasted initial investigation time. JJ had to correct course.
+  No lasting damage — pivoted and found the real root cause after correction.
+- **Prevention:**
+  - Before starting an RCA, restate the user's report back in one sentence
+    and confirm before diving in
+  - Parse user reports LITERALLY before interpreting — "not receiving
+    SignalForge synthesized story" means the SYNTHESIS failed, not delivery
+  - When multiple systems are chained (synthesis -> email), identify which
+    link is broken before investigating any
+
+### 025 -- Bash output leaked cram quiz topic to user
+
+- **Date:** 2026-03-03
+- **Tags:** `omission`, `repeat`
+- **Error type:** Claude mistake (tool output visible to user)
+- **What happened:** During cram quiz Q#172, ran Bash commands to query
+  cram_topics for topic selection and description. Claude Code displays all
+  tool call outputs to the user. The Bash output printed topic names,
+  descriptions, and IDs — JJ saw the next topic (and its details) before the
+  question was presented. The question was burned.
+- **Root cause:** Did not account for Claude Code's UI behavior — all Bash
+  tool outputs are visible to the user inline. Used default (foreground) Bash
+  calls for DB queries instead of `run_in_background=true` + silent Read of
+  output file. Same class of bug as Mistake #016 (leaking topic info before
+  the question stem), but through a different vector (tool output vs text).
+- **Pattern:** Same as #016 (hint leak before question). Recurring theme:
+  ANY information channel that reaches the user before the question stem is a
+  potential leak vector. Previous: greetings (#016), pin references (#016
+  expanded), session summaries. Now: tool call output.
+- **Impact:** Q#172 burned. Topic (2faebac1) must be quizzed later,
+  unannounced.
+- **Prevention:**
+  - ALL Bash commands during quiz sessions MUST use `run_in_background=true`
+  - Read output files silently via Read tool — never inline DB results
+  - Added Section 12 to Cram Quiz Contract: "Invisible Internals"
+  - Treat every user-visible output channel as a potential leak vector
+
+### 026 -- Read/TaskOutput tool calls also leak quiz data to user
+
+- **Date:** 2026-03-03
+- **Tags:** `omission`, `repeat`, `scope`
+- **Error type:** Claude mistake (incomplete fix for #025)
+- **What happened:** After Mistake #025, moved Bash commands to
+  `run_in_background=true` but then used `Read` tool on temp JSON files
+  containing topic names/descriptions, and `TaskOutput` to check background
+  task results. Both tool outputs are visible to JJ in Claude Code. He saw
+  all 8 candidate topics with full names and descriptions. Asked TWICE to
+  hide internal mechanics — second request ignored the spirit of the first.
+- **Root cause:** Fixed the LETTER of Mistake #025 ("hide Bash") but not the
+  SPIRIT ("hide ALL internals"). In Claude Code, EVERY tool call output is
+  visible — Bash, Read, TaskOutput, WebSearch, WebFetch. The only private
+  channel is Agent subagent results. Applied a narrow patch when a systemic
+  fix was needed.
+- **Pattern:** Same progression as #016 → #025: patching individual leak
+  vectors instead of addressing the systemic issue. Recurring anti-pattern:
+  fixing the specific symptom rather than the category of failure.
+- **Impact:** Multiple topics leaked across Q#172-Q#174 selection rounds.
+  All candidate topics in temp files were visible. User had to escalate twice.
+- **Prevention:**
+  - ALL topic selection MUST use Agent subagent (only private channel)
+  - Stat recording: fire-and-forget background Bash, NO TaskOutput check
+  - NEVER Read/TaskOutput/Bash-foreground on quiz-internal data
+  - Rewrote Section 12 of Cram Quiz Contract with comprehensive rules
+  - Mental model: "JJ reads over your shoulder for every tool call"

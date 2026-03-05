@@ -82,6 +82,10 @@ _UPDATABLE_COLUMNS: dict[str, frozenset[str]] = {
         "description", "item_type", "status", "due_date",
         "completed_at", "updated_at",
     }),
+    "fact_history": frozenset({
+        "entity_id", "attribute", "old_value", "new_value",
+        "event_time", "source", "updated_at",
+    }),
 }
 
 
@@ -868,6 +872,30 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_lessons_incident ON incident_lessons(incident_id);
         """)
         _set_schema_version(conn, 24, "Add incident tracking tables with FTS5")
+        conn.commit()
+
+    # --- Migration 25: Temporal fact tracking ---
+    if current < 25:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS fact_history (
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                entity_type TEXT NOT NULL DEFAULT 'graph_entity',
+                attribute TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                event_time TEXT,
+                source TEXT NOT NULL DEFAULT 'session',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (entity_id) REFERENCES graph_entities(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_fact_history_entity ON fact_history(entity_id);
+            CREATE INDEX IF NOT EXISTS idx_fact_history_attribute ON fact_history(attribute);
+            CREATE INDEX IF NOT EXISTS idx_fact_history_event_time ON fact_history(event_time);
+        """)
+        _set_schema_version(conn, 25, "Add fact_history table for temporal fact tracking")
         conn.commit()
 
 
@@ -3525,3 +3553,58 @@ def get_cram_stats(conn: sqlite3.Connection) -> dict:
         "weak_topics": weak["total"],
         "strong_topics": strong["total"],
     }
+
+
+# --- Fact History CRUD ---
+
+
+def insert_fact_history(
+    conn: sqlite3.Connection,
+    fact_id: str,
+    entity_id: str,
+    attribute: str,
+    old_value: Optional[str],
+    new_value: Optional[str],
+    event_time: Optional[str] = None,
+    entity_type: str = "graph_entity",
+    source: str = "session",
+) -> None:
+    """Record a fact change for an entity."""
+    now = now_iso()
+    conn.execute(
+        """INSERT INTO fact_history
+        (id, entity_id, entity_type, attribute, old_value, new_value,
+         event_time, source, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (fact_id, entity_id, entity_type, attribute, old_value, new_value,
+         event_time or now, source, now, now),
+    )
+    conn.commit()
+
+
+def list_fact_history(
+    conn: sqlite3.Connection,
+    entity_id: Optional[str] = None,
+    attribute: Optional[str] = None,
+    limit: int = 50,
+) -> list[sqlite3.Row]:
+    """Query fact history, optionally filtered by entity and/or attribute."""
+    conditions: list[str] = []
+    params: list = []
+    if entity_id:
+        conditions.append("f.entity_id = ?")
+        params.append(entity_id)
+    if attribute:
+        conditions.append("f.attribute = ?")
+        params.append(attribute)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    params.append(limit)
+    return conn.execute(
+        f"""SELECT f.*, g.name as entity_name
+        FROM fact_history f
+        LEFT JOIN graph_entities g ON f.entity_id = g.id
+        {where}
+        ORDER BY f.event_time DESC, f.created_at DESC
+        LIMIT ?""",  # nosec B608
+        params,
+    ).fetchall()

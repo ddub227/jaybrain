@@ -149,6 +149,38 @@ def _log_startup_refused(data_dir: Path, rival_pid: int) -> None:
         pass
 
 
+def _enforce_no_sleep() -> None:
+    """Ensure sleep timers are set to Never. Auto-fixes if not."""
+    if sys.platform != "win32":
+        return
+    try:
+        result = subprocess.run(
+            ["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=0x08000000,
+        )
+        if result.returncode != 0:
+            return
+
+        needs_fix = False
+        for line in result.stdout.splitlines():
+            if "Current AC Power Setting Index" in line or \
+               "Current DC Power Setting Index" in line:
+                val = int(line.split("0x")[1], 16)
+                if val != 0:
+                    needs_fix = True
+                    break
+
+        if needs_fix:
+            subprocess.run(["powercfg", "/change", "standby-timeout-ac", "0"],
+                           capture_output=True, timeout=10, creationflags=0x08000000)
+            subprocess.run(["powercfg", "/change", "standby-timeout-dc", "0"],
+                           capture_output=True, timeout=10, creationflags=0x08000000)
+            print("  Sleep timer was not 'Never' — auto-fixed")
+    except Exception:
+        pass
+
+
 def run_foreground() -> None:
     """Run the daemon in the foreground."""
     _load_env()
@@ -180,6 +212,9 @@ def run_foreground() -> None:
         _log_startup_refused(data_dir, alive_pid)
         lock_handle.close()
         sys.exit(1)
+
+    # Ensure sleep is disabled before starting
+    _enforce_no_sleep()
 
     # On Windows background mode, stdout/stderr may be invalid handles.
     # Always log to file; also log to stderr if available.

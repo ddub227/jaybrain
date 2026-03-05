@@ -109,6 +109,7 @@ class TestValidateFields:
             "telegram_bot_state", "cram_topics", "news_feed_sources",
             "signalforge_articles", "signalforge_clusters",
             "signalforge_synthesis", "incidents", "incident_action_items",
+            "fact_history",
         }
         assert set(_UPDATABLE_COLUMNS.keys()) == expected_tables
 

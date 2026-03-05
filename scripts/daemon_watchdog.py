@@ -227,6 +227,59 @@ def _restart_daemon() -> int | None:
         return None
 
 
+def _check_power_settings() -> dict | None:
+    """Check Windows sleep timer settings. Returns a dict if problems found, None if OK.
+
+    Auto-fixes sleep timers if they're not set to Never (0).
+    """
+    if sys.platform != "win32":
+        return None
+
+    try:
+        result = subprocess.run(
+            ["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=0x08000000,
+        )
+        if result.returncode != 0:
+            return None
+
+        # Parse AC and DC values from output
+        issues = []
+        lines = result.stdout.splitlines()
+        for i, line in enumerate(lines):
+            if "Current AC Power Setting Index" in line:
+                val = int(line.split("0x")[1], 16)
+                if val != 0:
+                    issues.append(f"AC sleep={val}s")
+            elif "Current DC Power Setting Index" in line:
+                val = int(line.split("0x")[1], 16)
+                if val != 0:
+                    issues.append(f"DC sleep={val}s")
+
+        if not issues:
+            return None
+
+        # Auto-fix: set both to Never
+        subprocess.run(
+            ["powercfg", "/change", "standby-timeout-ac", "0"],
+            capture_output=True, timeout=10,
+            creationflags=0x08000000,
+        )
+        subprocess.run(
+            ["powercfg", "/change", "standby-timeout-dc", "0"],
+            capture_output=True, timeout=10,
+            creationflags=0x08000000,
+        )
+
+        return {
+            "issues_found": issues,
+            "action": "auto-fixed to Never",
+        }
+    except Exception as e:
+        return {"issues_found": [f"check failed: {e}"], "action": "none"}
+
+
 def check_and_restart() -> dict:
     """Main watchdog logic. Returns a status dict."""
     _load_env()
@@ -301,17 +354,36 @@ def check_and_restart() -> dict:
         reason = "status_stopped (daemon_state shows stopped)"
 
     if not needs_restart:
-        # Daemon is healthy
+        # Daemon is healthy — also check power settings
+        power_result = _check_power_settings()
+        power_action = ""
+        if power_result:
+            power_action = f"power_fix: {power_result['issues_found']}"
+            _log_event(conn, "power_regression", daemon_pid=daemon_pid,
+                       heartbeat_age=heartbeat_age,
+                       action=power_action)
+            telegram_msg = (
+                f"*JayBrain Watchdog* \u26a1\n\n"
+                f"Sleep timer regression detected and auto-fixed!\n"
+                f"Issues: `{', '.join(power_result['issues_found'])}`\n"
+                f"Action: `{power_result['action']}`"
+            )
+            _send_telegram(telegram_msg)
+            print(f"[watchdog] Power regression fixed: {power_result['issues_found']}")
+
         _log_event(conn, "check_ok", daemon_pid=daemon_pid,
                    heartbeat_age=heartbeat_age, action="no action needed")
         msg = f"[watchdog] Daemon healthy (pid={daemon_pid}, heartbeat={heartbeat_age:.0f}s ago)"
         print(msg)
         conn.close()
-        return {
+        result = {
             "status": "healthy",
             "pid": daemon_pid,
             "heartbeat_age_seconds": heartbeat_age,
         }
+        if power_result:
+            result["power_fix"] = power_result
+        return result
 
     # Restart needed
     print(f"[watchdog] Daemon unhealthy: {reason}")
